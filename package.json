@@ -1,6 +1,6 @@
 {
   "name": "obs-descript-uploader",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A desktop relay from OBS recordings to Descript.",
   "author": "OBS Upload",
   "main": "dist-electron/main/main.js",
@@ -25,12 +25,14 @@
       "package.json"
     ],
     "mac": {
+      "icon": "build/icon.png",
       "target": [
         "dmg"
       ],
       "category": "public.app-category.video"
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis"
       ]
