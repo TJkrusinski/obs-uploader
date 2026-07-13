@@ -26,7 +26,7 @@ The Electron application will expose a configurable **Descript destination root 
 The effective folder for an uploaded recording will be:
 
 ```text
-<destination root>/<YYYY-MM-DD>
+<destination root>/<YY-MM-DD>
 ```
 
 For example:
@@ -47,7 +47,7 @@ Each OBS recording becomes one Descript project inside the folder corresponding 
 | Item | Convention |
 |---|---|
 | Destination root | User-configurable, default `OBS Recordings` |
-| Daily folder | `<destination root>/YYYY-MM-DD` |
+| Daily folder | `<destination root>/YY-MM-DD` |
 | Project | `YYYY-MM-DD_HH-mm-ss` |
 | Composition | `Recording` |
 | Media | Original OBS filename |
@@ -204,7 +204,7 @@ descript_project_name
 For newly discovered files:
 
 1. Determine the recording's calendar day in the configured timezone.
-2. Resolve `<destination root>/YYYY-MM-DD`.
+2. Resolve `<destination root>/YY-MM-DD`.
 3. Persist the resolved path.
 4. List projects in that exact Descript folder.
 5. Match by deterministic project name.
@@ -310,7 +310,7 @@ Deferred. Profiles may later bundle the local recording directory, OBS connectio
 3. The default root is `OBS Recordings`.
 4. Invalid or empty roots cannot be saved.
 5. The setting persists across application restarts.
-6. New recordings use `<configured root>/YYYY-MM-DD`.
+6. New recordings use `<configured root>/YY-MM-DD`.
 7. Each recording stores its resolved folder before upload begins.
 8. Existing queued recordings keep their original destination after a settings change.
 9. Reconciliation uses the folder persisted on each recording row.

@@ -12,9 +12,9 @@ const SUPPORTED_EXTENSIONS = new Set(['.mkv', '.mp4', '.mov', '.avi', '.webm', '
 function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(date)
   const value = (kind: string) => parts.find((part) => part.type === kind)?.value ?? ''
-  const year = value('year'); const month = value('month'); const day = value('day')
-  if (format === 'M.d.yyyy') return `${month}.${day}.${year}`
-  if (format === 'MM.dd.yyyy') return `${month.padStart(2, '0')}.${day.padStart(2, '0')}.${year}`
+  const year = value('year').slice(-2); const month = value('month'); const day = value('day')
+  if (format === 'M.d.yy') return `${month}.${day}.${year}`
+  if (format === 'MM.dd.yy') return `${month.padStart(2, '0')}.${day.padStart(2, '0')}.${year}`
   return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
 }
 function projectName(date: Date, timeZone: string): string {

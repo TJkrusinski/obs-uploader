@@ -10,7 +10,7 @@ const OBS_ACCOUNT = 'obs-websocket-password'
 const defaults = (): AppSettings => ({
   descriptDestinationRoot: '',
   recordingTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  recordingDateFormat: 'yyyy-MM-dd',
+  recordingDateFormat: 'yy-MM-dd',
   recordingsDirectory: null,
   reconciliationDirectory: null,
   obsHost: '127.0.0.1',
@@ -24,7 +24,10 @@ export function normalizeDestination(input: string): string {
 }
 
 function normalizeDateFormat(input: string): RecordingDateFormat {
-  if (input === 'yyyy-MM-dd' || input === 'M.d.yyyy' || input === 'MM.dd.yyyy') return input
+  if (input === 'yy-MM-dd' || input === 'M.d.yy' || input === 'MM.dd.yy') return input
+  if (input === 'yyyy-MM-dd') return 'yy-MM-dd'
+  if (input === 'M.d.yyyy') return 'M.d.yy'
+  if (input === 'MM.dd.yyyy') return 'MM.dd.yy'
   throw new Error('Choose a supported date-folder format.')
 }
 
@@ -38,7 +41,8 @@ export class SettingsStore {
 
   async load(): Promise<AppSettings> {
     try {
-      this.settings = { ...defaults(), ...JSON.parse(await readFile(this.filePath, 'utf8')) }
+      const saved = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<AppSettings> & { recordingDateFormat?: string }
+      this.settings = { ...defaults(), ...saved, recordingDateFormat: normalizeDateFormat(saved.recordingDateFormat ?? defaults().recordingDateFormat) }
     } catch {
       this.settings = defaults()
     }

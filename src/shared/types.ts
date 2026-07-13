@@ -1,5 +1,5 @@
 export type RecordingStatus = 'waiting' | 'uploading' | 'processing' | 'completed' | 'failed'
-export type RecordingDateFormat = 'yyyy-MM-dd' | 'M.d.yyyy' | 'MM.dd.yyyy'
+export type RecordingDateFormat = 'yy-MM-dd' | 'M.d.yy' | 'MM.dd.yy'
 
 export interface AppSettings {
   descriptDestinationRoot: string

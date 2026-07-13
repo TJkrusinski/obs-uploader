@@ -5,7 +5,7 @@ OBS Upload is a macOS and Windows Electron app that listens for OBS recording-st
 It creates projects in this structure:
 
 ```text
-[optional Descript root/]<date folder>/<YYYY-MM-DD_HH-mm-ss>
+[optional Descript root/]<YY-MM-DD>/<YYYY-MM-DD_HH-mm-ss>
 ```
 
 Each project contains a `Recording` composition and the original OBS media file.
