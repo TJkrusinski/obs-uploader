@@ -11,6 +11,9 @@ const desktopApi: DesktopApi = {
   stopMonitoring: () => ipcRenderer.invoke('watcher:stop'),
   reconcile: () => ipcRenderer.invoke('recordings:reconcile'),
   retryRecording: (id) => ipcRenderer.invoke('recordings:retry', id),
+  setRecordingHidden: (id, hidden) => ipcRenderer.invoke('recordings:setHidden', id, hidden),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  openUpdatePage: () => ipcRenderer.invoke('updates:open'),
   onStateChanged: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: Parameters<typeof callback>[0]) => callback(state)
     ipcRenderer.on('app:stateChanged', listener)

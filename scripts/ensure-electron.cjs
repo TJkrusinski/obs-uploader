@@ -14,19 +14,22 @@ const platformPath = platform === 'darwin'
 const executable = path.join(electronDir, 'dist', platformPath)
 
 async function ensureElectron() {
-  if (fs.existsSync(executable)) return
-  const archive = await downloadArtifact({
-    version: electron.version,
-    artifactName: 'electron',
-    platform,
-    arch,
-    checksums: require(path.join(electronDir, 'checksums.json'))
-  })
-  await extract(archive, { dir: path.join(electronDir, 'dist') })
+  if (!fs.existsSync(executable)) {
+    const archive = await downloadArtifact({
+      version: electron.version,
+      artifactName: 'electron',
+      platform,
+      arch,
+      checksums: require(path.join(electronDir, 'checksums.json'))
+    })
+    await extract(archive, { dir: path.join(electronDir, 'dist') })
+  }
   fs.writeFileSync(path.join(electronDir, 'path.txt'), platformPath)
 }
 
-ensureElectron().catch((error) => {
+const keepAlive = setInterval(() => undefined, 1_000)
+ensureElectron().then(() => clearInterval(keepAlive)).catch((error) => {
+  clearInterval(keepAlive)
   console.error('Unable to finish Electron installation:', error)
   process.exit(1)
 })

@@ -21,6 +21,7 @@ export class LedgerDatabase {
         descript_job_id TEXT,
         status TEXT NOT NULL,
         error_message TEXT,
+        hidden INTEGER NOT NULL DEFAULT 0,
         discovered_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -32,6 +33,8 @@ export class LedgerDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
     `)
+    const recordingColumns = this.db.pragma('table_info(recordings)') as Array<{ name: string }>
+    if (!recordingColumns.some((column) => column.name === 'hidden')) this.db.exec('ALTER TABLE recordings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
   }
 
   getRecordings(): Recording[] {
@@ -45,10 +48,10 @@ export class LedgerDatabase {
     const row = this.db.prepare('SELECT * FROM recordings WHERE local_path = ?').get(localPath)
     return row ? mapRecording(row) : undefined
   }
-  create(recording: Omit<Recording, 'id' | 'status' | 'errorMessage' | 'discoveredAt' | 'updatedAt'>): Recording {
+  create(recording: Omit<Recording, 'id' | 'status' | 'errorMessage' | 'hidden' | 'discoveredAt' | 'updatedAt'>): Recording {
     const now = new Date().toISOString()
-    const result: Recording = { ...recording, id: randomUUID(), status: 'waiting', errorMessage: null, discoveredAt: now, updatedAt: now }
-    this.db.prepare(`INSERT INTO recordings VALUES (@id,@localPath,@originalFilename,@recordedAt,@fileSize,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@status,@errorMessage,@discoveredAt,@updatedAt)`).run(result)
+    const result: Recording = { ...recording, id: randomUUID(), status: 'waiting', errorMessage: null, hidden: false, discoveredAt: now, updatedAt: now }
+    this.db.prepare(`INSERT INTO recordings (id,local_path,original_filename,recorded_at,file_size,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,status,error_message,hidden,discovered_at,updated_at) VALUES (@id,@localPath,@originalFilename,@recordedAt,@fileSize,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@status,@errorMessage,0,@discoveredAt,@updatedAt)`).run(result)
     return result
   }
   update(id: string, values: Partial<Pick<Recording, 'status' | 'errorMessage' | 'descriptProjectId' | 'descriptJobId'>>): void {
@@ -60,6 +63,9 @@ export class LedgerDatabase {
   }
   getPending(): Recording[] {
     return this.db.prepare("SELECT * FROM recordings WHERE status IN ('waiting','uploading','processing') ORDER BY discovered_at ASC").all().map(mapRecording)
+  }
+  setHidden(id: string, hidden: boolean): void {
+    this.db.prepare('UPDATE recordings SET hidden = ?, updated_at = ? WHERE id = ?').run(hidden ? 1 : 0, new Date().toISOString(), id)
   }
   getActivity(): ActivityItem[] {
     return this.db.prepare('SELECT * FROM activity ORDER BY created_at DESC LIMIT 20').all().map((row: any) => ({ id: row.id, kind: row.kind, message: row.message, createdAt: row.created_at }))
@@ -75,6 +81,6 @@ function mapRecording(row: any): Recording {
     id: row.id, localPath: row.local_path, originalFilename: row.original_filename, recordedAt: row.recorded_at,
     fileSize: row.file_size, descriptFolderPath: row.descript_folder_path, descriptProjectName: row.descript_project_name,
     descriptProjectId: row.descript_project_id, descriptJobId: row.descript_job_id, status: row.status as RecordingStatus,
-    errorMessage: row.error_message, discoveredAt: row.discovered_at, updatedAt: row.updated_at
+    errorMessage: row.error_message, hidden: Boolean(row.hidden), discoveredAt: row.discovered_at, updatedAt: row.updated_at
   }
 }

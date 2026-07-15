@@ -23,6 +23,7 @@ export interface Recording {
   descriptJobId: string | null
   status: RecordingStatus
   errorMessage: string | null
+  hidden: boolean
   discoveredAt: string
   updatedAt: string
 }
@@ -40,6 +41,15 @@ export interface ConnectionState {
   watcher: 'watching' | 'stopped'
 }
 
+export interface UpdateState {
+  status: 'idle' | 'checking' | 'current' | 'available' | 'error'
+  currentVersion: string
+  latestVersion: string | null
+  releaseUrl: string | null
+  checkedAt: string | null
+  message: string | null
+}
+
 export interface AppSnapshot {
   settings: AppSettings
   hasDescriptToken: boolean
@@ -47,6 +57,7 @@ export interface AppSnapshot {
   recordings: Recording[]
   activity: ActivityItem[]
   activeRecording: string | null
+  update: UpdateState
 }
 
 export interface SettingsInput extends AppSettings {
@@ -64,6 +75,9 @@ export interface DesktopApi {
   stopMonitoring: () => Promise<void>
   reconcile: () => Promise<void>
   retryRecording: (id: string) => Promise<void>
+  setRecordingHidden: (id: string, hidden: boolean) => Promise<void>
+  checkForUpdates: () => Promise<UpdateState>
+  openUpdatePage: () => Promise<void>
   onStateChanged: (callback: (state: AppSnapshot) => void) => () => void
 }
 

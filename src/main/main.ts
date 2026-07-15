@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
 import { join } from 'node:path'
-import type { AppSnapshot, ConnectionState, SettingsInput } from '../shared/types.js'
+import type { AppSnapshot, ConnectionState, SettingsInput, UpdateState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
 import { DescriptService, ObsService, RecordingWatcher } from './services.js'
 import { SettingsStore } from './settings.js'
@@ -13,16 +13,56 @@ let obs: ObsService
 let watcher: RecordingWatcher
 let descriptState: ConnectionState['descript'] = 'disconnected'
 let hasDescriptToken = false
+const releasesUrl = 'https://github.com/TJkrusinski/obs-uploader/releases'
+let updateState: UpdateState = { status: 'idle', currentVersion: app.getVersion(), latestVersion: null, releaseUrl: null, checkedAt: null, message: null }
 
 function snapshot(): AppSnapshot {
   return {
     settings: settings.get(),
     hasDescriptToken,
     connections: { obs: obs.getState(), descript: descriptState, watcher: watcher.isWatching() ? 'watching' : 'stopped' },
-    recordings: ledger.getRecordings(), activity: ledger.getActivity(), activeRecording: ledger.getPending()[0]?.originalFilename ?? null
+    recordings: ledger.getRecordings(), activity: ledger.getActivity(), activeRecording: ledger.getPending()[0]?.originalFilename ?? null,
+    update: updateState
   }
 }
 function broadcast(): void { window?.webContents.send('app:stateChanged', snapshot()) }
+
+function parseVersion(value: string): [number, number, number, string | null] | null {
+  const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ?? null] : null
+}
+
+function isNewerVersion(candidate: string, current: string): boolean {
+  const next = parseVersion(candidate); const installed = parseVersion(current)
+  if (!next || !installed) return false
+  const nextNumbers = next.slice(0, 3) as number[]; const installedNumbers = installed.slice(0, 3) as number[]
+  for (let index = 0; index < nextNumbers.length; index += 1) {
+    if (nextNumbers[index] !== installedNumbers[index]) return nextNumbers[index] > installedNumbers[index]
+  }
+  return installed[3] !== null && next[3] === null
+}
+
+async function checkForUpdates(): Promise<UpdateState> {
+  updateState = { ...updateState, status: 'checking', message: null }; broadcast()
+  try {
+    const response = await net.fetch('https://api.github.com/repos/TJkrusinski/obs-uploader/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `OBS-Upload/${app.getVersion()}` },
+      signal: AbortSignal.timeout(10_000)
+    })
+    if (!response.ok) throw new Error(`GitHub returned ${response.status}.`)
+    const release = await response.json() as { tag_name?: unknown; html_url?: unknown }
+    if (typeof release.tag_name !== 'string' || !parseVersion(release.tag_name)) throw new Error('The latest release does not have a valid version tag.')
+    const releaseUrl = typeof release.html_url === 'string' && release.html_url.startsWith(`${releasesUrl}/tag/`) ? release.html_url : releasesUrl
+    const available = isNewerVersion(release.tag_name, app.getVersion())
+    updateState = {
+      status: available ? 'available' : 'current', currentVersion: app.getVersion(), latestVersion: release.tag_name.replace(/^v/, ''),
+      releaseUrl: available ? releaseUrl : null, checkedAt: new Date().toISOString(), message: null
+    }
+  } catch (error) {
+    updateState = { ...updateState, status: 'error', checkedAt: new Date().toISOString(), message: error instanceof Error ? error.message : String(error) }
+  }
+  broadcast(); return updateState
+}
 
 async function createWindow(): Promise<void> {
   window = new BrowserWindow({
@@ -46,6 +86,8 @@ app.whenReady().then(async () => {
   })
   obs = new ObsService(settings, () => broadcast(), (path) => watcher.recordingStopped(path), (available) => watcher.setObsStopEventsAvailable(available))
   registerIpc(); await createWindow()
+  setTimeout(() => void checkForUpdates(), 3_000)
+  setInterval(() => void checkForUpdates(), 6 * 60 * 60_000)
   if (settings.get().recordingsDirectory) await watcher.start().catch(() => undefined)
   setInterval(() => void descript.reconcile().then(broadcast).catch(() => undefined), 60_000)
 })
@@ -90,6 +132,14 @@ function registerIpc(): void {
     const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
     ledger.update(id, { status: 'waiting', errorMessage: null, descriptJobId: null, descriptProjectId: null })
     await descript.reconcile(); broadcast()
+  })
+  ipcMain.handle('recordings:setHidden', (_event, id: string, hidden: boolean) => {
+    if (!ledger.getRecording(id)) throw new Error('Recording not found.')
+    ledger.setHidden(id, Boolean(hidden)); broadcast()
+  })
+  ipcMain.handle('updates:check', () => checkForUpdates())
+  ipcMain.handle('updates:open', async () => {
+    await shell.openExternal(updateState.releaseUrl ?? releasesUrl)
   })
 }
 
