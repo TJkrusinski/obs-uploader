@@ -1,6 +1,6 @@
 {
   "name": "obs-descript-uploader",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A desktop relay from OBS recordings to Descript.",
   "author": "OBS Upload",
   "main": "dist-electron/main/main.js",
