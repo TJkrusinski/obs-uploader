@@ -8,6 +8,7 @@ import { LedgerDatabase } from './database.js'
 import { SettingsStore } from './settings.js'
 
 const SUPPORTED_EXTENSIONS = new Set(['.mkv', '.mp4', '.mov', '.avi', '.webm', '.mp3', '.wav', '.m4a'])
+const FILE_STABILITY_DELAY_MS = 1_500
 
 function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(date)
@@ -27,6 +28,8 @@ function contentType(path: string): string {
 }
 
 export class DescriptService {
+  private readonly activeUploads = new Map<string, AbortController>()
+
   constructor(private readonly settings: SettingsStore, private readonly ledger: LedgerDatabase) {}
 
   async test(tokenOverride?: string): Promise<{ ok: boolean; message: string }> {
@@ -52,10 +55,15 @@ export class DescriptService {
   }
 
   async upload(recording: Recording): Promise<void> {
-    const token = await this.settings.getDescriptToken()
-    if (!token) throw new Error('Connect Descript before uploading recordings.')
-    this.ledger.update(recording.id, { status: 'uploading', errorMessage: null })
+    if (this.activeUploads.has(recording.id)) return
+    const controller = new AbortController()
+    this.activeUploads.set(recording.id, controller)
     try {
+      const token = await this.settings.getDescriptToken()
+      if (!token) throw new Error('Connect Descript before uploading recordings.')
+      controller.signal.throwIfAborted()
+      if (this.ledger.getRecording(recording.id)?.status === 'canceled') return
+      this.ledger.update(recording.id, { status: 'uploading', errorMessage: null })
       const source = await fs.stat(recording.localPath)
       const body = {
         project_name: recording.descriptProjectName,
@@ -65,22 +73,44 @@ export class DescriptService {
         add_compositions: [{ name: 'Recording', clips: [{ media: recording.originalFilename }] }]
       }
       const response = await fetch('https://descriptapi.com/v1/jobs/import/project_media', {
-        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
       })
       if (!response.ok) throw new Error(`Descript import request failed (${response.status}): ${await response.text()}`)
       const result = await response.json() as { job_id: string; project_id: string; upload_urls?: Record<string, { upload_url: string }> }
+      controller.signal.throwIfAborted()
       this.ledger.update(recording.id, { status: 'processing', descriptJobId: result.job_id, descriptProjectId: result.project_id })
       const uploadUrl = result.upload_urls?.[recording.originalFilename]?.upload_url
       if (uploadUrl) {
         const stream = Readable.toWeb(createReadStream(recording.localPath)) as ReadableStream
-        const upload = await fetch(uploadUrl, { method: 'PUT', body: stream, duplex: 'half', headers: { 'Content-Type': contentType(recording.localPath), 'Content-Length': String(source.size) } } as RequestInit & { duplex: 'half' })
+        const upload = await fetch(uploadUrl, { method: 'PUT', body: stream, duplex: 'half', headers: { 'Content-Type': contentType(recording.localPath), 'Content-Length': String(source.size) }, signal: controller.signal } as RequestInit & { duplex: 'half' })
         if (!upload.ok) throw new Error(`File transfer to Descript failed (${upload.status}).`)
       }
+      controller.signal.throwIfAborted()
       this.ledger.addActivity('info', `Sent ${recording.originalFilename} to Descript for processing.`)
     } catch (error) {
+      if (controller.signal.aborted || this.ledger.getRecording(recording.id)?.status === 'canceled') return
       this.ledger.update(recording.id, { status: 'failed', errorMessage: error instanceof Error ? error.message : String(error) })
       this.ledger.addActivity('error', `Upload failed for ${recording.originalFilename}.`)
       throw error
+    } finally {
+      if (this.activeUploads.get(recording.id) === controller) this.activeUploads.delete(recording.id)
+    }
+  }
+
+  async cancel(recording: Recording): Promise<void> {
+    if (!['waiting', 'uploading', 'processing'].includes(recording.status)) throw new Error('Only queued or active recordings can be canceled.')
+    this.ledger.update(recording.id, { status: 'canceled', errorMessage: null })
+    this.activeUploads.get(recording.id)?.abort()
+    this.ledger.addActivity('warning', `Canceled ${recording.originalFilename}.`)
+
+    if (!recording.descriptJobId) return
+    const token = await this.settings.getDescriptToken()
+    if (!token) throw new Error('The upload was stopped locally, but the Descript job could not be canceled because no API token is available.')
+    const response = await fetch(`https://descriptapi.com/v1/jobs/${recording.descriptJobId}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${token}` }
+    })
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`The upload was stopped locally, but Descript could not cancel the remote job (${response.status}).`)
     }
   }
 
@@ -118,6 +148,7 @@ export class DescriptService {
 export class RecordingWatcher {
   private watcher: FSWatcher | null = null
   private scanTimer: NodeJS.Timeout | null = null
+  private readonly pendingIngestions = new Map<string, Promise<void>>()
   private active = false
   private obsStopEventsAvailable = false
   constructor(
@@ -146,16 +177,29 @@ export class RecordingWatcher {
     if (dir) await this.scanDirectory(dir)
   }
   async recordingStopped(path: string): Promise<void> {
-    if (this.active) await this.ingest(path, false)
+    if (this.active) await this.ingest(path)
   }
   private async scanDirectory(dir: string): Promise<void> { for (const name of await fs.readdir(dir)) await this.ingest(join(dir, name)) }
-  async ingest(path: string, waitForStable = true): Promise<void> {
+  async ingest(path: string): Promise<void> {
     if (!SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase()) || this.ledger.getByPath(path)) return
+    const pending = this.pendingIngestions.get(path)
+    if (pending) return pending
+    const ingestion = this.ingestWhenReady(path).finally(() => {
+      if (this.pendingIngestions.get(path) === ingestion) this.pendingIngestions.delete(path)
+    })
+    this.pendingIngestions.set(path, ingestion)
+    return ingestion
+  }
+  private async ingestWhenReady(path: string): Promise<void> {
     try {
       const initial = await fs.stat(path); if (!initial.isFile()) return
-      if (waitForStable) await new Promise((resolve) => setTimeout(resolve, 1500))
-      const stable = waitForStable ? await fs.stat(path) : initial
-      if (waitForStable && stable.size !== initial.size) return
+      // OBS creates its output file before recording data is available. Leave an
+      // empty or changing file undiscovered so a later watch event/scan retries it.
+      if (initial.size === 0) return
+      await new Promise((resolve) => setTimeout(resolve, FILE_STABILITY_DELAY_MS))
+      const stable = await fs.stat(path)
+      if (!stable.isFile() || stable.size === 0 || stable.size !== initial.size || stable.mtimeMs !== initial.mtimeMs) return
+      if (this.ledger.getByPath(path)) return
       const settings = this.settings.get(); const date = stable.birthtimeMs ? stable.birthtime : stable.mtime
       const folder = [settings.descriptDestinationRoot, recordingDate(date, settings.recordingTimezone, settings.recordingDateFormat)].filter(Boolean).join('/')
       const recording = this.ledger.create({ localPath: path, originalFilename: basename(path), recordedAt: date.toISOString(), fileSize: stable.size, descriptFolderPath: folder, descriptProjectName: projectName(date, settings.recordingTimezone), descriptProjectId: null, descriptJobId: null })

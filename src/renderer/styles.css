@@ -54,12 +54,12 @@ button { cursor: pointer; }
 .chip-action:hover:not(:disabled) { color: #e0bc32; }
 .chip-action:disabled { opacity: .45; cursor: default; }
 
-.stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 10px 0 22px; }
+.stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 10px 0 22px; }
 .stat-card { position: relative; overflow: hidden; padding: 14px; }
 .stat-card strong { display: block; color: #e8e8e8; font-size: 24px; font-weight: 600; letter-spacing: -.04em; }
 .stat-card span:last-child { color: #7f7f7f; font-size: 11px; }
 .stat-mark { display: block; width: 24px; height: 2px; margin-bottom: 13px; background: #777; }
-.amber { background: #a48621; }.blue { background: #6a8295; }.violet { background: #8777a0; }.green { background: #739a7d; }.red { background: #ae6567; }
+.amber { background: #a48621; }.blue { background: #6a8295; }.violet { background: #8777a0; }.green { background: #739a7d; }.red { background: #ae6567; }.gray { background: #777; }
 
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(290px, .8fr); gap: 12px; }
 .panel { overflow: hidden; }
@@ -69,16 +69,18 @@ button { cursor: pointer; }
 .count-chip { border: 1px solid #303030; border-radius: 3px; padding: 3px 6px; color: #8c8c8c; font-size: 10px; }
 .panel-toggle { display: inline-flex; align-items: center; gap: 5px; border: 0; padding: 0; background: transparent; color: #999; font-size: 10px; font-weight: 700; }
 .panel-toggle:hover { color: #d0d0d0; }
-.recording-row { display: grid; grid-template-columns: 34px minmax(150px, 1.2fr) minmax(140px, .8fr) 120px; gap: 10px; align-items: center; border-bottom: 1px solid #222; padding: 13px 18px; }
+.recording-row { display: grid; grid-template-columns: 34px minmax(150px, 1.2fr) minmax(140px, .8fr) 155px; gap: 10px; align-items: center; border-bottom: 1px solid #222; padding: 13px 18px; }
 .recording-row.hidden-recording { background: #080808; }
 .recording-row:last-child, .activity-item:last-child { border-bottom: 0; }
 .file-icon { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid #343434; border-radius: 4px; background: #111; color: #aaa; }
 .recording-name strong, .recording-destination strong { display: block; overflow: hidden; color: #d7d7d7; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .recording-name span, .recording-destination span { display: block; margin-top: 3px; color: #777; font-size: 10px; }
 .status-badge { display: inline-block; border: 1px solid #383838; border-radius: 3px; padding: 3px 6px; color: #aaa; font-size: 10px; font-weight: 700; text-transform: capitalize; }
-.status-badge.waiting { border-color: #65582e; color: #cdb66a; }.status-badge.uploading { border-color: #3e5c72; color: #91b7d4; }.status-badge.processing { border-color: #58456e; color: #b8a1d2; }.status-badge.completed { border-color: #42604b; color: #9bc5a6; }.status-badge.failed { border-color: #703b40; color: #df999d; }
+.status-badge.waiting { border-color: #65582e; color: #cdb66a; }.status-badge.uploading { border-color: #3e5c72; color: #91b7d4; }.status-badge.processing { border-color: #58456e; color: #b8a1d2; }.status-badge.completed { border-color: #42604b; color: #9bc5a6; }.status-badge.failed { border-color: #703b40; color: #df999d; }.status-badge.canceled { border-color: #444; color: #999; }
 .recording-status { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .text-button { border: 0; padding: 4px 0; background: transparent; color: #c7a628; font-size: 11px; font-weight: 700; }
+.text-button.danger { color: #d98286; }
+.text-button:disabled, .row-action:disabled { opacity: .42; cursor: default; }
 .row-action { display: grid; width: 25px; height: 25px; flex: none; place-items: center; border: 1px solid transparent; border-radius: 3px; padding: 0; background: transparent; color: #777; }
 .row-action:hover { border-color: #3a3a3a; background: #111; color: #ccc; }
 .empty-state { display: grid; place-items: center; gap: 8px; padding: 45px 20px; color: #777; font-size: 13px; text-align: center; }

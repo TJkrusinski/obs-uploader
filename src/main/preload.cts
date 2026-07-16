@@ -11,6 +11,7 @@ const desktopApi: DesktopApi = {
   stopMonitoring: () => ipcRenderer.invoke('watcher:stop'),
   reconcile: () => ipcRenderer.invoke('recordings:reconcile'),
   retryRecording: (id) => ipcRenderer.invoke('recordings:retry', id),
+  cancelRecording: (id) => ipcRenderer.invoke('recordings:cancel', id),
   setRecordingHidden: (id, hidden) => ipcRenderer.invoke('recordings:setHidden', id, hidden),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openUpdatePage: () => ipcRenderer.invoke('updates:open'),

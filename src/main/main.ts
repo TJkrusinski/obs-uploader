@@ -27,6 +27,22 @@ function snapshot(): AppSnapshot {
 }
 function broadcast(): void { window?.webContents.send('app:stateChanged', snapshot()) }
 
+async function connectObsAndSync(input: { host: string; port: number; password?: string }): Promise<{ ok: boolean; message: string; recordingDirectory?: string }> {
+  const result = await obs.connect(input)
+  if (result.ok && result.recordingDirectory) {
+    await settings.setRecordingsDirectory(result.recordingDirectory)
+    if (watcher.isWatching()) await watcher.start()
+  }
+  broadcast()
+  return result
+}
+
+async function initializeObsAndWatcher(): Promise<void> {
+  const { obsHost, obsPort } = settings.get()
+  await connectObsAndSync({ host: obsHost, port: obsPort })
+  if (settings.get().recordingsDirectory && !watcher.isWatching()) await watcher.start()
+}
+
 function parseVersion(value: string): [number, number, number, string | null] | null {
   const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
   return match ? [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ?? null] : null
@@ -88,7 +104,9 @@ app.whenReady().then(async () => {
   registerIpc(); await createWindow()
   setTimeout(() => void checkForUpdates(), 3_000)
   setInterval(() => void checkForUpdates(), 6 * 60 * 60_000)
-  if (settings.get().recordingsDirectory) await watcher.start().catch(() => undefined)
+  void initializeObsAndWatcher().catch(() => {
+    if (settings.get().recordingsDirectory && !watcher.isWatching()) void watcher.start().catch(() => undefined)
+  })
   setInterval(() => void descript.reconcile().then(broadcast).catch(() => undefined), 60_000)
 })
 
@@ -117,21 +135,20 @@ function registerIpc(): void {
     return result
   })
   ipcMain.handle('obs:connect', async (_event, input: { host: string; port: number; password?: string }) => {
-    const result = await obs.connect(input)
-    if (result.ok && result.recordingDirectory) {
-      await settings.setRecordingsDirectory(result.recordingDirectory)
-      if (watcher.isWatching()) await watcher.start()
-      broadcast()
-    }
-    return result
+    return connectObsAndSync(input)
   })
   ipcMain.handle('watcher:start', async () => { await watcher.start(); broadcast() })
   ipcMain.handle('watcher:stop', () => watcher.stop())
   ipcMain.handle('recordings:reconcile', async () => { await watcher.scanReconciliationDirectory(); await descript.reconcile(); broadcast() })
   ipcMain.handle('recordings:retry', async (_event, id: string) => {
     const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
+    if (recording.status !== 'failed') throw new Error('Only failed recordings can be retried.')
     ledger.update(id, { status: 'waiting', errorMessage: null, descriptJobId: null, descriptProjectId: null })
     await descript.reconcile(); broadcast()
+  })
+  ipcMain.handle('recordings:cancel', async (_event, id: string) => {
+    const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
+    try { await descript.cancel(recording) } finally { broadcast() }
   })
   ipcMain.handle('recordings:setHidden', (_event, id: string, hidden: boolean) => {
     if (!ledger.getRecording(id)) throw new Error('Recording not found.')
