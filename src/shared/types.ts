@@ -1,4 +1,4 @@
-export type RecordingStatus = 'waiting' | 'uploading' | 'processing' | 'completed' | 'failed'
+export type RecordingStatus = 'waiting' | 'uploading' | 'processing' | 'completed' | 'failed' | 'canceled'
 export type RecordingDateFormat = 'yy-MM-dd' | 'M.d.yy' | 'MM.dd.yy'
 
 export interface AppSettings {
@@ -75,6 +75,7 @@ export interface DesktopApi {
   stopMonitoring: () => Promise<void>
   reconcile: () => Promise<void>
   retryRecording: (id: string) => Promise<void>
+  cancelRecording: (id: string) => Promise<void>
   setRecordingHidden: (id: string, hidden: boolean) => Promise<void>
   checkForUpdates: () => Promise<UpdateState>
   openUpdatePage: () => Promise<void>
