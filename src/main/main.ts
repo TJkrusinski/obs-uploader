@@ -140,15 +140,24 @@ function registerIpc(): void {
   ipcMain.handle('watcher:start', async () => { await watcher.start(); broadcast() })
   ipcMain.handle('watcher:stop', () => watcher.stop())
   ipcMain.handle('recordings:reconcile', async () => { await watcher.scanReconciliationDirectory(); await descript.reconcile(); broadcast() })
-  ipcMain.handle('recordings:retry', async (_event, id: string) => {
+  ipcMain.handle('recordings:reset', async (_event, id: string) => {
     const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
-    if (recording.status !== 'failed') throw new Error('Only failed recordings can be retried.')
+    if (recording.status === 'completed') throw new Error('Completed recordings cannot be reset.')
+    if (['waiting', 'uploading', 'processing'].includes(recording.status)) await descript.cancel(recording)
     ledger.update(id, { status: 'waiting', errorMessage: null, descriptJobId: null, descriptProjectId: null })
+    ledger.addActivity('info', `Reset ${recording.originalFilename} for retry.`)
     await descript.reconcile(); broadcast()
   })
   ipcMain.handle('recordings:cancel', async (_event, id: string) => {
     const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
     try { await descript.cancel(recording) } finally { broadcast() }
+  })
+  ipcMain.handle('recordings:delete', async (_event, id: string) => {
+    const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
+    if (['waiting', 'uploading', 'processing'].includes(recording.status)) await descript.cancel(recording)
+    ledger.deleteFromQueue(id)
+    ledger.addActivity('warning', `Removed ${recording.originalFilename} from the queue. The local file was kept.`)
+    broadcast()
   })
   ipcMain.handle('recordings:setHidden', (_event, id: string, hidden: boolean) => {
     if (!ledger.getRecording(id)) throw new Error('Recording not found.')
