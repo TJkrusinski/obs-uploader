@@ -38,5 +38,5 @@ The packaged app is written to `release/`.
 
 - Destination changes only affect recordings found afterward. Leave the optional root blank to create date folders directly at the Descript Drive root, and choose the date format in Settings. Each ledger entry saves its resolved folder at discovery time.
 - The API creates missing nested Descript folders during the first matching import. Its folder APIs do not offer a non-mutating path-validation call, so **Test token** verifies authentication without creating a project.
-- Reconciliation lists remote projects by saved folder path and deterministic project name, then checks asynchronous import job status.
+- Reconciliation discovers only local files from the current calendar day (in the configured recording timezone), lists remote projects by saved folder path and deterministic project name, then checks asynchronous import job status.
 - Descript's import API uses a signed direct-upload URL: the app requests it, streams the local recording to it, and polls the returned job.
