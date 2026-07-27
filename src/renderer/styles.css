@@ -22,6 +22,8 @@ button { cursor: pointer; }
 .button.primary { border-color: #8a7016; background: #8a7016; color: #14120a; }
 .button.primary:hover:not(:disabled) { border-color: #a98a1c; background: #a98a1c; color: #080704; }
 .button.secondary, .button.ghost { background: transparent; color: #bdbdbd; }
+.button.danger { border-color: #593135; background: transparent; color: #d98286; }
+.button.danger:hover:not(:disabled) { border-color: #87464c; background: #170d0e; color: #eca5a8; }
 .button.ghost { border-color: transparent; }
 
 .notice { display: flex; align-items: center; gap: 9px; margin: 0 0 20px; border: 1px solid #333; border-radius: 4px; padding: 11px 13px; background: #0d0d0d; color: #ccc; font-size: 13px; }
@@ -69,6 +71,7 @@ button { cursor: pointer; }
 .count-chip { border: 1px solid #303030; border-radius: 3px; padding: 3px 6px; color: #8c8c8c; font-size: 10px; }
 .panel-toggle { display: inline-flex; align-items: center; gap: 5px; border: 0; padding: 0; background: transparent; color: #999; font-size: 10px; font-weight: 700; }
 .panel-toggle:hover { color: #d0d0d0; }
+.panel-toggle:disabled { opacity: .42; cursor: default; }
 .recording-row { display: grid; grid-template-columns: 34px minmax(150px, 1.2fr) minmax(140px, .8fr) 190px; gap: 10px; align-items: center; border-bottom: 1px solid #222; padding: 13px 18px; }
 .recording-row.hidden-recording { background: #080808; }
 .recording-row:last-child, .activity-item:last-child { border-bottom: 0; }

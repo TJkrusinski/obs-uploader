@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
 import { join } from 'node:path'
 import type { AppSnapshot, ConnectionState, SettingsInput, UpdateState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
-import { DescriptService, ObsService, RecordingWatcher } from './services.js'
+import { DescriptService, isBeforeRecordingDay, isSameRecordingDay, ObsService, RecordingWatcher } from './services.js'
 import { SettingsStore } from './settings.js'
 
 let window: BrowserWindow | null = null
@@ -140,6 +140,25 @@ function registerIpc(): void {
   ipcMain.handle('watcher:start', async () => { await watcher.start(); broadcast() })
   ipcMain.handle('watcher:stop', () => watcher.stop())
   ipcMain.handle('recordings:reconcile', async () => { await watcher.scanReconciliationDirectory(); await descript.reconcile(); broadcast() })
+  ipcMain.handle('recordings:resetToday', async () => {
+    const { recordingTimezone } = settings.get()
+    const now = new Date()
+    const recordings = ledger.getAllRecordings().filter((recording) => isSameRecordingDay(new Date(recording.recordedAt), now, recordingTimezone))
+    await descript.stopLocalWork(recordings)
+    const deleted = ledger.deleteRecordings(recordings.map((recording) => recording.id))
+    ledger.addActivity('warning', `Reset today by removing ${deleted} local queue record${deleted === 1 ? '' : 's'}. Recording files and Descript projects were not changed.`)
+    broadcast()
+    return deleted
+  })
+  ipcMain.handle('recordings:hideBeforeToday', () => {
+    const { recordingTimezone } = settings.get()
+    const now = new Date()
+    const recordings = ledger.getRecordings().filter((recording) => !recording.hidden && isBeforeRecordingDay(new Date(recording.recordedAt), now, recordingTimezone))
+    const hidden = ledger.setHiddenMany(recordings.map((recording) => recording.id), true)
+    ledger.addActivity('info', `Hid ${hidden} queue record${hidden === 1 ? '' : 's'} from before today.`)
+    broadcast()
+    return hidden
+  })
   ipcMain.handle('recordings:reset', async (_event, id: string) => {
     const recording = ledger.getRecording(id); if (!recording) throw new Error('Recording not found.')
     if (recording.status === 'completed') throw new Error('Completed recordings cannot be reset.')
