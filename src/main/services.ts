@@ -1,7 +1,7 @@
 import { createReadStream, promises as fs } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { watch, type FSWatcher } from 'node:fs'
+import { watch, type FSWatcher, type Stats } from 'node:fs'
 import OBSWebSocket, { EventSubscription } from 'obs-websocket-js'
 import type { ConnectionState, Recording, RecordingDateFormat } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
@@ -18,6 +18,12 @@ function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat
   if (format === 'MM.dd.yy') return `${month.padStart(2, '0')}.${day.padStart(2, '0')}.${year}`
   return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
 }
+function fileRecordingDate(stats: Stats): Date {
+  return stats.birthtimeMs ? stats.birthtime : stats.mtime
+}
+function isSameRecordingDay(left: Date, right: Date, timeZone: string): boolean {
+  return recordingDate(left, timeZone, 'yy-MM-dd') === recordingDate(right, timeZone, 'yy-MM-dd')
+}
 function projectName(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date)
   const value = (kind: string) => parts.find((part) => part.type === kind)?.value ?? '00'
@@ -28,7 +34,8 @@ function contentType(path: string): string {
 }
 
 export class DescriptService {
-  private readonly activeUploads = new Map<string, AbortController>()
+  private readonly activeUploads = new Map<string, { controller: AbortController; done: Promise<void> }>()
+  private readonly activePolls = new Map<string, Set<AbortController>>()
 
   constructor(private readonly settings: SettingsStore, private readonly ledger: LedgerDatabase) {}
 
@@ -57,7 +64,9 @@ export class DescriptService {
   async upload(recording: Recording): Promise<void> {
     if (this.activeUploads.has(recording.id)) return
     const controller = new AbortController()
-    this.activeUploads.set(recording.id, controller)
+    let finish!: () => void
+    const operation = { controller, done: new Promise<void>((resolve) => { finish = resolve }) }
+    this.activeUploads.set(recording.id, operation)
     try {
       const token = await this.settings.getDescriptToken()
       if (!token) throw new Error('Connect Descript before uploading recordings.')
@@ -93,14 +102,18 @@ export class DescriptService {
       this.ledger.addActivity('error', `Upload failed for ${recording.originalFilename}.`)
       throw error
     } finally {
-      if (this.activeUploads.get(recording.id) === controller) this.activeUploads.delete(recording.id)
+      if (this.activeUploads.get(recording.id) === operation) this.activeUploads.delete(recording.id)
+      finish()
     }
   }
 
   async cancel(recording: Recording): Promise<void> {
     if (!['waiting', 'uploading', 'processing'].includes(recording.status)) throw new Error('Only queued or active recordings can be canceled.')
     this.ledger.update(recording.id, { status: 'canceled', errorMessage: null })
-    this.activeUploads.get(recording.id)?.abort()
+    const operation = this.activeUploads.get(recording.id)
+    operation?.controller.abort()
+    for (const controller of this.activePolls.get(recording.id) ?? []) controller.abort()
+    if (operation) await operation.done
     this.ledger.addActivity('warning', `Canceled ${recording.originalFilename}.`)
 
     if (!recording.descriptJobId) return
@@ -131,15 +144,28 @@ export class DescriptService {
 
   private async pollProcessing(token: string): Promise<void> {
     for (const recording of this.ledger.getPending().filter((item) => item.status === 'processing' && item.descriptJobId)) {
-      const response = await fetch(`https://descriptapi.com/v1/jobs/${recording.descriptJobId}`, { headers: { Authorization: `Bearer ${token}` } })
-      if (!response.ok) continue
-      const job = await response.json() as { job_state?: string; result?: { status?: string } }
-      if (job.job_state !== 'stopped') continue
-      if (job.result?.status === 'success') {
-        this.ledger.update(recording.id, { status: 'completed', errorMessage: null })
-        this.ledger.addActivity('success', `${recording.originalFilename} finished processing in Descript.`)
-      } else {
-        this.ledger.update(recording.id, { status: 'failed', errorMessage: 'Descript processing did not complete successfully.' })
+      const controller = new AbortController()
+      const controllers = this.activePolls.get(recording.id) ?? new Set<AbortController>()
+      controllers.add(controller)
+      this.activePolls.set(recording.id, controllers)
+      try {
+        const response = await fetch(`https://descriptapi.com/v1/jobs/${recording.descriptJobId}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+        if (!response.ok) continue
+        const job = await response.json() as { job_state?: string; result?: { status?: string } }
+        if (job.job_state !== 'stopped') continue
+        const current = this.ledger.getRecording(recording.id)
+        if (current?.status !== 'processing' || current.descriptJobId !== recording.descriptJobId) continue
+        if (job.result?.status === 'success') {
+          this.ledger.update(recording.id, { status: 'completed', errorMessage: null })
+          this.ledger.addActivity('success', `${recording.originalFilename} finished processing in Descript.`)
+        } else {
+          this.ledger.update(recording.id, { status: 'failed', errorMessage: 'Descript processing did not complete successfully.' })
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) throw error
+      } finally {
+        controllers.delete(controller)
+        if (controllers.size === 0 && this.activePolls.get(recording.id) === controllers) this.activePolls.delete(recording.id)
       }
     }
   }
@@ -174,12 +200,25 @@ export class RecordingWatcher {
   async scanReconciliationDirectory(): Promise<void> {
     const settings = this.settings.get()
     const dir = settings.reconciliationDirectory ?? settings.recordingsDirectory
-    if (dir) await this.scanDirectory(dir)
+    const today = new Date()
+    if (dir) await this.scanDirectory(dir, (stats) => isSameRecordingDay(fileRecordingDate(stats), today, settings.recordingTimezone))
   }
   async recordingStopped(path: string): Promise<void> {
     if (this.active) await this.ingest(path)
   }
-  private async scanDirectory(dir: string): Promise<void> { for (const name of await fs.readdir(dir)) await this.ingest(join(dir, name)) }
+  private async scanDirectory(dir: string, include?: (stats: Stats) => boolean): Promise<void> {
+    for (const name of await fs.readdir(dir)) {
+      const path = join(dir, name)
+      if (!include) {
+        await this.ingest(path)
+        continue
+      }
+      try {
+        const stats = await fs.stat(path)
+        if (include(stats)) await this.ingest(path)
+      } catch { /* A file may disappear while the directory is being scanned. */ }
+    }
+  }
   async ingest(path: string): Promise<void> {
     if (!SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase()) || this.ledger.getByPath(path)) return
     const pending = this.pendingIngestions.get(path)
@@ -200,7 +239,7 @@ export class RecordingWatcher {
       const stable = await fs.stat(path)
       if (!stable.isFile() || stable.size === 0 || stable.size !== initial.size || stable.mtimeMs !== initial.mtimeMs) return
       if (this.ledger.getByPath(path)) return
-      const settings = this.settings.get(); const date = stable.birthtimeMs ? stable.birthtime : stable.mtime
+      const settings = this.settings.get(); const date = fileRecordingDate(stable)
       const folder = [settings.descriptDestinationRoot, recordingDate(date, settings.recordingTimezone, settings.recordingDateFormat)].filter(Boolean).join('/')
       const recording = this.ledger.create({ localPath: path, originalFilename: basename(path), recordedAt: date.toISOString(), fileSize: stable.size, descriptFolderPath: folder, descriptProjectName: projectName(date, settings.recordingTimezone), descriptProjectId: null, descriptJobId: null })
       this.ledger.addActivity('info', `Discovered ${basename(path)}.`); this.onChange()

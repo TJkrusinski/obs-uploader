@@ -22,6 +22,7 @@ export class LedgerDatabase {
         status TEXT NOT NULL,
         error_message TEXT,
         hidden INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
         discovered_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -35,10 +36,11 @@ export class LedgerDatabase {
     `)
     const recordingColumns = this.db.pragma('table_info(recordings)') as Array<{ name: string }>
     if (!recordingColumns.some((column) => column.name === 'hidden')) this.db.exec('ALTER TABLE recordings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
+    if (!recordingColumns.some((column) => column.name === 'deleted')) this.db.exec('ALTER TABLE recordings ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0')
   }
 
   getRecordings(): Recording[] {
-    return this.db.prepare('SELECT * FROM recordings ORDER BY recorded_at DESC').all().map(mapRecording)
+    return this.db.prepare('SELECT * FROM recordings WHERE deleted = 0 ORDER BY recorded_at DESC').all().map(mapRecording)
   }
   getRecording(id: string): Recording | undefined {
     const row = this.db.prepare('SELECT * FROM recordings WHERE id = ?').get(id)
@@ -62,10 +64,13 @@ export class LedgerDatabase {
     this.db.prepare(`UPDATE recordings SET ${set}, updated_at = @updatedAt WHERE id = @id`).run({ ...values, id, updatedAt: new Date().toISOString() })
   }
   getPending(): Recording[] {
-    return this.db.prepare("SELECT * FROM recordings WHERE status IN ('waiting','uploading','processing') ORDER BY discovered_at ASC").all().map(mapRecording)
+    return this.db.prepare("SELECT * FROM recordings WHERE deleted = 0 AND status IN ('waiting','uploading','processing') ORDER BY discovered_at ASC").all().map(mapRecording)
   }
   setHidden(id: string, hidden: boolean): void {
     this.db.prepare('UPDATE recordings SET hidden = ?, updated_at = ? WHERE id = ?').run(hidden ? 1 : 0, new Date().toISOString(), id)
+  }
+  deleteFromQueue(id: string): void {
+    this.db.prepare('UPDATE recordings SET deleted = 1, updated_at = ? WHERE id = ?').run(new Date().toISOString(), id)
   }
   getActivity(): ActivityItem[] {
     return this.db.prepare('SELECT * FROM activity ORDER BY created_at DESC LIMIT 20').all().map((row: any) => ({ id: row.id, kind: row.kind, message: row.message, createdAt: row.created_at }))
