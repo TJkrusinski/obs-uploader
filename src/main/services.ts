@@ -21,8 +21,16 @@ function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat
 function fileRecordingDate(stats: Stats): Date {
   return stats.birthtimeMs ? stats.birthtime : stats.mtime
 }
-function isSameRecordingDay(left: Date, right: Date, timeZone: string): boolean {
-  return recordingDate(left, timeZone, 'yy-MM-dd') === recordingDate(right, timeZone, 'yy-MM-dd')
+function recordingDayKey(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
+  const value = (kind: string) => parts.find((part) => part.type === kind)?.value ?? ''
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+export function isSameRecordingDay(left: Date, right: Date, timeZone: string): boolean {
+  return recordingDayKey(left, timeZone) === recordingDayKey(right, timeZone)
+}
+export function isBeforeRecordingDay(left: Date, right: Date, timeZone: string): boolean {
+  return recordingDayKey(left, timeZone) < recordingDayKey(right, timeZone)
 }
 function projectName(date: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date)
@@ -125,6 +133,19 @@ export class DescriptService {
     if (!response.ok && response.status !== 404) {
       throw new Error(`The upload was stopped locally, but Descript could not cancel the remote job (${response.status}).`)
     }
+  }
+
+  async stopLocalWork(recordings: Recording[]): Promise<void> {
+    const operations: Promise<void>[] = []
+    for (const recording of recordings) {
+      const operation = this.activeUploads.get(recording.id)
+      if (operation) {
+        operation.controller.abort()
+        operations.push(operation.done)
+      }
+      for (const controller of this.activePolls.get(recording.id) ?? []) controller.abort()
+    }
+    await Promise.all(operations)
   }
 
   private async listProjects(token: string): Promise<Array<{ id: string; name: string; folder_path: string }>> {

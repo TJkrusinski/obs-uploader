@@ -74,6 +74,8 @@ export interface DesktopApi {
   startMonitoring: () => Promise<void>
   stopMonitoring: () => Promise<void>
   reconcile: () => Promise<void>
+  resetToday: () => Promise<number>
+  hideBeforeToday: () => Promise<number>
   resetRecording: (id: string) => Promise<void>
   cancelRecording: (id: string) => Promise<void>
   deleteRecording: (id: string) => Promise<void>

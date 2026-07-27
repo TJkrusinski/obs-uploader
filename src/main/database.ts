@@ -42,6 +42,9 @@ export class LedgerDatabase {
   getRecordings(): Recording[] {
     return this.db.prepare('SELECT * FROM recordings WHERE deleted = 0 ORDER BY recorded_at DESC').all().map(mapRecording)
   }
+  getAllRecordings(): Recording[] {
+    return this.db.prepare('SELECT * FROM recordings ORDER BY recorded_at DESC').all().map(mapRecording)
+  }
   getRecording(id: string): Recording | undefined {
     const row = this.db.prepare('SELECT * FROM recordings WHERE id = ?').get(id)
     return row ? mapRecording(row) : undefined
@@ -69,8 +72,29 @@ export class LedgerDatabase {
   setHidden(id: string, hidden: boolean): void {
     this.db.prepare('UPDATE recordings SET hidden = ?, updated_at = ? WHERE id = ?').run(hidden ? 1 : 0, new Date().toISOString(), id)
   }
+  setHiddenMany(ids: string[], hidden: boolean): number {
+    if (!ids.length) return 0
+    const update = this.db.prepare('UPDATE recordings SET hidden = ?, updated_at = ? WHERE id = ? AND deleted = 0')
+    const transaction = this.db.transaction((recordingIds: string[]) => {
+      const updatedAt = new Date().toISOString()
+      let changed = 0
+      for (const id of recordingIds) changed += update.run(hidden ? 1 : 0, updatedAt, id).changes
+      return changed
+    })
+    return transaction(ids)
+  }
   deleteFromQueue(id: string): void {
     this.db.prepare('UPDATE recordings SET deleted = 1, updated_at = ? WHERE id = ?').run(new Date().toISOString(), id)
+  }
+  deleteRecordings(ids: string[]): number {
+    if (!ids.length) return 0
+    const remove = this.db.prepare('DELETE FROM recordings WHERE id = ?')
+    const transaction = this.db.transaction((recordingIds: string[]) => {
+      let deleted = 0
+      for (const id of recordingIds) deleted += remove.run(id).changes
+      return deleted
+    })
+    return transaction(ids)
   }
   getActivity(): ActivityItem[] {
     return this.db.prepare('SELECT * FROM activity ORDER BY created_at DESC LIMIT 20').all().map((row: any) => ({ id: row.id, kind: row.kind, message: row.message, createdAt: row.created_at }))
