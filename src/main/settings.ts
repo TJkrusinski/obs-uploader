@@ -14,7 +14,13 @@ const defaults = (): AppSettings => ({
   recordingsDirectory: null,
   reconciliationDirectory: null,
   obsHost: '127.0.0.1',
-  obsPort: 4455
+  obsPort: 4455,
+  monitorObs: true,
+  monitorVmix: false,
+  vmixHost: '127.0.0.1',
+  vmixPort: 8088,
+  vmixUseApi: true,
+  vmixRecordingLocations: []
 })
 
 export function normalizeDestination(input: string): string {
@@ -56,10 +62,19 @@ export class SettingsStore {
       descriptDestinationRoot: normalizeDestination(input.descriptDestinationRoot),
       recordingTimezone: input.recordingTimezone || defaults().recordingTimezone,
       recordingDateFormat: normalizeDateFormat(input.recordingDateFormat),
-      recordingsDirectory: this.settings.recordingsDirectory ?? input.recordingsDirectory ?? null,
+      recordingsDirectory: input.recordingsDirectory || null,
       reconciliationDirectory: input.reconciliationDirectory || null,
       obsHost: input.obsHost.trim() || '127.0.0.1',
-      obsPort: Number(input.obsPort) || 4455
+      obsPort: Number(input.obsPort) || 4455,
+      monitorObs: Boolean(input.monitorObs),
+      monitorVmix: Boolean(input.monitorVmix),
+      vmixHost: input.vmixHost.trim() || '127.0.0.1',
+      vmixPort: Number(input.vmixPort) || 8088,
+      vmixUseApi: Boolean(input.vmixUseApi),
+      vmixRecordingLocations: input.vmixRecordingLocations.map((location) => ({
+        ...location, path: location.path.trim(), label: location.label.trim(),
+        filenameFilter: location.filenameFilter?.trim() || null
+      }))
     }
     this.settings = next
     await writeFile(this.filePath, JSON.stringify(next, null, 2), 'utf8')
