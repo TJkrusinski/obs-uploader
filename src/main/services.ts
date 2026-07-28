@@ -5,7 +5,9 @@ import { watch, type FSWatcher, type Stats } from 'node:fs'
 import OBSWebSocket, { EventSubscription } from 'obs-websocket-js'
 import type { CaptureSession, ConnectionState, RecordingDateFormat, RecordingLocation, VmixState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
+import { buildDescriptImportBody } from './descript-import.js'
 import { SettingsStore } from './settings.js'
+import { parseVmixManifestMediaNames } from './vmix-manifest.js'
 
 const SUPPORTED_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.wav', '.mp3', '.m4a', '.aiff', '.flac', '.opus', '.aac'])
 const FILE_STABILITY_DELAY_MS = 2_000
@@ -91,13 +93,7 @@ export class DescriptService {
       if (!primary.length) throw new Error('This session has no primary recording.')
       if (files.some((file) => file.stabilityStatus !== 'stable')) throw new Error('Every included file must be stable before upload.')
       this.ledger.updateSession(session.id, { status: 'uploading', errorMessage: null })
-      const body = {
-        project_name: session.descriptProjectName,
-        folder_name: session.descriptFolderPath,
-        team_access: 'edit',
-        add_media: Object.fromEntries(files.map((file) => [file.descriptMediaKey, { content_type: file.contentType, file_size: file.fileSize }])),
-        add_compositions: [{ name: 'Recording', clips: primary.map((file) => ({ media: file.descriptMediaKey })) }]
-      }
+      const body = buildDescriptImportBody(session)
       const response = await fetch('https://descriptapi.com/v1/jobs/import/project_media', {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
       })
@@ -215,16 +211,11 @@ export class RecordingWatcher {
   private readonly watchers: FSWatcher[] = []
   private scanTimer: NodeJS.Timeout | null = null
   private readonly pendingIngestions = new Map<string, Promise<void>>()
-  private readonly pendingVmixProbes = new Map<string, Promise<void>>()
+  private readonly pendingVmixManifests = new Map<string, Promise<void>>()
+  private readonly vmixManifestErrors = new Map<string, string>()
   private active = false
   private obsStopEventsAvailable = false
-  private vmixSessionId: string | null = null
-  private activeVmixLocations: RecordingLocation[] | null = null
-  private vmixBaseline = new Map<string, Set<string>>()
-  private vmixFalseSince: number | null = null
-  private vmixFinalizationTimer: NodeJS.Timeout | null = null
-  private vmixFinalizationStartedAt: number | null = null
-  private lastVmixActivity = 0
+  private vmixManifestBaseline = new Set<string>()
   constructor(
     private readonly settings: SettingsStore,
     private readonly ledger: LedgerDatabase,
@@ -247,19 +238,23 @@ export class RecordingWatcher {
     if (settings.recorderType === 'vmix') {
       const locations = settings.vmixRecordingLocations.filter((location) => location.enabled)
       if (!locations.length) throw new Error('Add at least one enabled vMix recording location.')
-      for (const location of locations) {
-        await fs.access(location.path)
-        directories.push(location.path)
-        this.watchDirectory(location.path, (filename) => {
-          if (filename) void this.observeVmixFile(join(location.path, filename.toString()), location)
+      const uniqueDirectories = [...new Set(locations.map((location) => location.path))]
+      for (const directory of uniqueDirectories) {
+        await fs.access(directory)
+        directories.push(directory)
+      }
+      await this.refreshVmixManifestBaseline()
+      for (const directory of uniqueDirectories) {
+        this.watchDirectory(directory, (filename) => {
+          if (filename && extname(filename.toString()).toLowerCase() === '.xml') {
+            void this.ingestVmixManifest(join(directory, filename.toString()))
+          }
         })
       }
-      await this.refreshVmixBaseline()
     }
     if (!directories.length) throw new Error('Choose OBS or vMix before starting monitoring.')
     this.scanTimer = setInterval(() => void this.scan(), 10_000)
     this.active = true
-    await this.recoverVmixSession()
     await this.scan()
     this.ledger.addActivity('success', `Monitoring ${directories.length} recording location${directories.length === 1 ? '' : 's'}.`)
     this.onChange()
@@ -267,8 +262,7 @@ export class RecordingWatcher {
   stop(): void {
     this.watchers.splice(0).forEach((watcher) => watcher.close())
     if (this.scanTimer) clearInterval(this.scanTimer)
-    if (this.vmixFinalizationTimer) clearTimeout(this.vmixFinalizationTimer)
-    this.scanTimer = null; this.vmixFinalizationTimer = null; this.active = false; this.onChange()
+    this.scanTimer = null; this.active = false; this.onChange()
   }
   setObsStopEventsAvailable(available: boolean): void { this.obsStopEventsAvailable = available }
   private watchDirectory(directory: string, onFilename: (filename: string | Buffer | null) => void): void {
@@ -287,14 +281,7 @@ export class RecordingWatcher {
     const settings = this.settings.get()
     const dir = settings.recordingsDirectory
     if (settings.recorderType === 'obs' && dir && !this.obsStopEventsAvailable) await this.scanDirectory(dir)
-    if (settings.recorderType === 'vmix') {
-      if (this.vmixSessionId) {
-        await this.scanVmixLocations()
-        if (!settings.vmixUseApi && Date.now() - this.lastVmixActivity >= 60_000) await this.enterVmixFinalization('filesystem')
-      } else if (!settings.vmixUseApi) {
-        await this.scanForFilesystemVmixStart()
-      }
-    }
+    if (settings.recorderType === 'vmix') await this.scanVmixManifests()
   }
   async scanReconciliationDirectory(): Promise<void> {
     const settings = this.settings.get()
@@ -306,39 +293,38 @@ export class RecordingWatcher {
     if (this.active) await this.ingest(path)
   }
   async vmixStateChanged(recording: boolean, multiCorder: boolean): Promise<void> {
-    if (!this.active || this.settings.get().recorderType !== 'vmix') return
-    if (recording || multiCorder) {
-      this.vmixFalseSince = null
-      if (!this.vmixSessionId) await this.openVmixSession('vmix_api')
-      else this.ledger.updateSession(this.vmixSessionId, { status: 'recording', errorMessage: null })
-      return
-    }
-    if (!this.vmixSessionId) return
-    if (this.vmixFalseSince === null) this.vmixFalseSince = Date.now()
-    if (Date.now() - this.vmixFalseSince >= 5_000) await this.enterVmixFinalization('vmix_api')
+    void recording
+    void multiCorder
   }
   async finalizeSessionManually(id: string): Promise<void> {
     const session = this.ledger.getSession(id)
     if (!session || session.recorderType !== 'vmix') throw new Error('vMix session not found.')
     if (!['needs_review', 'connection_lost', 'finalizing'].includes(session.status)) throw new Error('Only a session awaiting review can be finalized manually.')
-    this.vmixSessionId = session.id
-    this.activeVmixLocations = snapshotLocations(session) ?? this.settings.get().vmixRecordingLocations.filter((location) => location.enabled)
-    this.vmixFinalizationStartedAt = null
-    await this.buildRecoveryBaseline(session)
-    await this.enterVmixFinalization('manual')
+    const included = session.files.filter((file) => file.uploadStatus !== 'excluded')
+    const stable = await Promise.all(included.map((file) => this.stableFile(file.localPath)))
+    stable.forEach((stats, index) => this.ledger.updateFile(included[index].id, {
+      fileSize: stats.size, modifiedAt: stats.mtime.toISOString(), stabilityStatus: 'stable', errorMessage: null
+    }))
+    if (!included.some((file) => file.sourceRole === 'primary')) throw new Error('No primary recording was discovered.')
+    this.ledger.updateSession(id, { status: 'ready', sessionEnd: new Date().toISOString(), finalizationSource: 'manual', errorMessage: null })
+    const ready = this.ledger.getSession(id)!
+    this.onChange()
+    void this.onRecordingReady(ready).catch(() => this.onChange())
   }
   async recheckSession(id: string): Promise<void> {
     const session = this.ledger.getSession(id)
     if (!session) throw new Error('Session not found.')
-    await Promise.all(session.files.filter((file) => file.uploadStatus !== 'excluded').map((file) => this.probeVmixFile(file.id)))
+    for (const file of session.files.filter((item) => item.uploadStatus !== 'excluded')) {
+      try {
+        const stats = await this.stableFile(file.localPath)
+        this.ledger.updateFile(file.id, { fileSize: stats.size, modifiedAt: stats.mtime.toISOString(), stabilityStatus: 'stable', errorMessage: null })
+      } catch {
+        this.ledger.updateFile(file.id, { stabilityStatus: 'missing', uploadStatus: 'missing', errorMessage: 'File is missing or still changing.' })
+      }
+    }
     this.onChange()
   }
-  vmixConnectionLost(): void {
-    if (!this.vmixSessionId) return
-    this.vmixFalseSince = null
-    this.ledger.updateSession(this.vmixSessionId, { status: 'connection_lost', errorMessage: 'The vMix API connection was lost. File monitoring is continuing.' })
-    this.onChange()
-  }
+  vmixConnectionLost(): void {}
   private async scanDirectory(dir: string, include?: (stats: Stats) => boolean): Promise<void> {
     for (const name of await fs.readdir(dir)) {
       const path = join(dir, name)
@@ -353,223 +339,119 @@ export class RecordingWatcher {
     }
   }
   private vmixLocations(): RecordingLocation[] {
-    return this.activeVmixLocations ?? this.settings.get().vmixRecordingLocations.filter((location) => location.enabled)
+    return this.settings.get().vmixRecordingLocations.filter((location) => location.enabled)
   }
-  private async recoverVmixSession(): Promise<void> {
-    const recoverable = this.ledger.getRecoverableSessions().filter((session) => session.recorderType === 'vmix' && ['recording', 'connection_lost', 'finalizing'].includes(session.status))
-    const session = recoverable.at(-1)
-    for (const stale of recoverable.slice(0, -1)) this.ledger.updateSession(stale.id, { status: 'needs_review', errorMessage: 'Another unfinished vMix session was recovered. Review this session manually.' })
-    if (!session) return
-    this.activeVmixLocations = snapshotLocations(session) ?? this.settings.get().vmixRecordingLocations.filter((location) => location.enabled)
-    try {
-      for (const location of this.activeVmixLocations) await fs.readdir(location.path)
-    } catch {
-      this.ledger.updateSession(session.id, { status: 'needs_review', errorMessage: 'A persisted recording location is unavailable.' })
-      this.activeVmixLocations = null
-      return
-    }
-    this.vmixSessionId = session.id
-    this.lastVmixActivity = Date.parse(session.updatedAt)
-    await this.buildRecoveryBaseline(session)
-    await this.scanVmixLocations()
-    if (session.status === 'finalizing') {
-      this.vmixFinalizationStartedAt = session.sessionEnd ? Date.parse(session.sessionEnd) : Date.now()
-      this.ledger.getSession(session.id)?.files.forEach((file) => void this.probeVmixFile(file.id))
-      this.resetVmixFinalizationGrace()
-    }
-    this.ledger.addActivity('info', `Recovered unfinished vMix session ${session.descriptProjectName}.`)
-  }
-  private async buildRecoveryBaseline(session: CaptureSession): Promise<void> {
-    const assigned = new Set(session.files.map((file) => canonicalPath(file.localPath)))
-    const started = Date.parse(session.sessionStart)
-    const baseline = new Map<string, Set<string>>()
-    for (const location of this.vmixLocations()) {
-      const paths = new Set<string>()
-      for (const name of await fs.readdir(location.path)) {
-        const path = join(location.path, name)
-        const canonical = canonicalPath(path)
-        if (assigned.has(canonical)) continue
-        try {
-          const stats = await fs.stat(path)
-          if (stats.mtimeMs < started) paths.add(canonical)
-        } catch { /* Startup scans tolerate files disappearing. */ }
+  private async refreshVmixManifestBaseline(): Promise<void> {
+    const baseline = new Set<string>()
+    for (const directory of new Set(this.vmixLocations().map((location) => location.path))) {
+      for (const name of await fs.readdir(directory)) {
+        if (extname(name).toLowerCase() === '.xml') baseline.add(canonicalPath(join(directory, name)))
       }
-      baseline.set(location.id, paths)
     }
-    this.vmixBaseline = baseline
+    this.vmixManifestBaseline = baseline
   }
-  private async refreshVmixBaseline(): Promise<void> {
-    const baseline = new Map<string, Set<string>>()
-    for (const location of this.vmixLocations()) {
-      const paths = new Set<string>()
-      for (const name of await fs.readdir(location.path)) paths.add(canonicalPath(join(location.path, name)))
-      baseline.set(location.id, paths)
-    }
-    this.vmixBaseline = baseline
-  }
-  private async scanForFilesystemVmixStart(): Promise<void> {
-    for (const location of this.vmixLocations()) {
-      const baseline = this.vmixBaseline.get(location.id) ?? new Set<string>()
-      for (const name of await fs.readdir(location.path)) {
-        const path = join(location.path, name)
-        if (!baseline.has(canonicalPath(path)) && eligibleForLocation(path, location)) {
-          await this.openVmixSession('filesystem')
-          await this.observeVmixFile(path, location)
-          return
-        }
+  private async scanVmixManifests(): Promise<void> {
+    for (const directory of new Set(this.vmixLocations().map((location) => location.path))) {
+      for (const name of await fs.readdir(directory)) {
+        if (extname(name).toLowerCase() === '.xml') await this.ingestVmixManifest(join(directory, name))
       }
     }
   }
-  private async openVmixSession(source: 'vmix_api' | 'filesystem'): Promise<void> {
-    if (this.vmixSessionId) return
-    const settings = this.settings.get()
-    const date = new Date()
-    const folder = [settings.descriptDestinationRoot, recordingDate(date, settings.recordingTimezone, settings.recordingDateFormat)].filter(Boolean).join('/')
-    const session = this.ledger.createSession({
-      recorderType: 'vmix', status: 'recording', sessionStart: date.toISOString(), sessionEnd: null,
-      finalizationSource: null, descriptFolderPath: folder, descriptProjectName: projectName(date, settings.recordingTimezone),
-      descriptProjectId: null, descriptJobId: null,
-      configurationSnapshot: JSON.stringify({
-        recorderType: 'vmix', confirmation: source === 'vmix_api' ? 'vmix_confirmed' : 'filesystem_inferred',
-        host: settings.vmixHost, port: settings.vmixPort, useApi: settings.vmixUseApi, locations: this.vmixLocations()
-      })
-    }, [])
-    this.vmixSessionId = session.id
-    this.activeVmixLocations = settings.vmixRecordingLocations.filter((location) => location.enabled)
-    this.vmixFinalizationStartedAt = null
-    this.lastVmixActivity = Date.now()
-    this.ledger.addActivity('info', `${source === 'vmix_api' ? 'vMix confirmed' : 'Filesystem inferred'} session opened: ${session.descriptProjectName}.`)
-    this.onChange()
-    await this.scanVmixLocations()
-  }
-  private async scanVmixLocations(): Promise<void> {
-    for (const location of this.vmixLocations()) {
-      for (const name of await fs.readdir(location.path)) await this.observeVmixFile(join(location.path, name), location)
-    }
-  }
-  private async observeVmixFile(path: string, location: RecordingLocation): Promise<void> {
-    if (!eligibleForLocation(path, location)) return
-    if (!this.vmixSessionId) {
-      if (this.settings.get().vmixUseApi) return
-      await this.openVmixSession('filesystem')
-    }
-    if ((this.vmixBaseline.get(location.id) ?? new Set<string>()).has(canonicalPath(path))) return
-    const existing = this.ledger.getByPath(path)
-    if (existing) {
-      try {
-        const stats = await fs.stat(path)
-        if (stats.size !== existing.fileSize || stats.mtime.toISOString() !== existing.modifiedAt) {
-          this.ledger.updateFile(existing.id, { fileSize: stats.size, modifiedAt: stats.mtime.toISOString(), stabilityStatus: 'pending' })
-          this.lastVmixActivity = Date.now()
-          if (this.vmixFinalizationStartedAt) this.resetVmixFinalizationGrace()
-        }
-      } catch {
-        this.ledger.updateFile(existing.id, { stabilityStatus: 'missing', uploadStatus: 'missing', errorMessage: 'File disappeared before upload.' })
-      }
-      return
-    }
-    try {
-      const stats = await fs.stat(path)
-      if (!stats.isFile()) return
-      const session = this.ledger.getSession(this.vmixSessionId!)
-      if (!session) return
-      const filename = basename(path)
-      const mediaKey = uniqueMediaKey(session, location.label, filename)
-      const segmentIndex = session.files.filter((file) => file.locationId === location.id).length
-      const file = this.ledger.addSessionFile(session.id, {
-        locationId: location.id, sourceLabel: location.label, sourceRole: location.role, localPath: path,
-        originalFilename: filename, descriptMediaKey: mediaKey, contentType: contentType(path), fileSize: stats.size,
-        modifiedAt: stats.mtime.toISOString(), segmentIndex, stabilityStatus: 'pending', uploadStatus: 'pending'
-      })
-      this.lastVmixActivity = Date.now()
-      this.ledger.addActivity('info', `Discovered ${location.label} — ${filename}.`)
-      if (this.vmixFinalizationStartedAt) {
-        this.resetVmixFinalizationGrace()
-        void this.probeVmixFile(file.id)
-      }
-      this.onChange()
-    } catch { /* File may be mid-rename or temporarily unavailable. */ }
-  }
-  private async enterVmixFinalization(source: 'vmix_api' | 'filesystem' | 'manual'): Promise<void> {
-    if (!this.vmixSessionId || this.vmixFinalizationStartedAt) return
-    this.vmixFinalizationStartedAt = Date.now()
-    this.ledger.updateSession(this.vmixSessionId, {
-      status: 'finalizing', sessionEnd: new Date().toISOString(), finalizationSource: source, errorMessage: null
-    })
-    await this.scanVmixLocations()
-    const session = this.ledger.getSession(this.vmixSessionId)
-    session?.files.forEach((file) => void this.probeVmixFile(file.id))
-    this.resetVmixFinalizationGrace()
-    this.ledger.addActivity('info', `Finalizing ${session?.files.length ?? 0} vMix file${session?.files.length === 1 ? '' : 's'}.`)
-    this.onChange()
-  }
-  private resetVmixFinalizationGrace(): void {
-    if (this.vmixFinalizationTimer) clearTimeout(this.vmixFinalizationTimer)
-    this.vmixFinalizationTimer = setTimeout(() => void this.tryCompleteVmixFinalization(), 15_000)
-  }
-  private async probeVmixFile(fileId: string): Promise<void> {
-    if (this.pendingVmixProbes.has(fileId)) return this.pendingVmixProbes.get(fileId)
-    const operation = (async () => {
-      const file = this.ledger.getSessions().flatMap((session) => session.files).find((candidate) => candidate.id === fileId)
-      if (!file) return
-      try {
-        let stats = await fs.stat(file.localPath)
-        if (!stats.isFile() || stats.size === 0) return
-        for (let probe = 1; probe < 3; probe += 1) {
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, FILE_STABILITY_DELAY_MS))
-          const next = await fs.stat(file.localPath)
-          if (!next.isFile() || next.size === 0 || next.size !== stats.size || next.mtimeMs !== stats.mtimeMs) {
-            this.ledger.updateFile(file.id, { fileSize: next.size, modifiedAt: next.mtime.toISOString(), stabilityStatus: 'pending' })
-            return
-          }
-          stats = next
-        }
-        this.ledger.updateFile(file.id, { fileSize: stats.size, modifiedAt: stats.mtime.toISOString(), stabilityStatus: 'stable', errorMessage: null })
-      } catch {
-        this.ledger.updateFile(file.id, { stabilityStatus: 'missing', uploadStatus: 'missing', errorMessage: 'File disappeared before upload.' })
-      } finally {
+  private async ingestVmixManifest(path: string): Promise<void> {
+    const canonical = canonicalPath(path)
+    if (this.vmixManifestBaseline.has(canonical)) return
+    const pending = this.pendingVmixManifests.get(canonical)
+    if (pending) return pending
+    const operation = this.ingestVmixManifestWhenReady(path).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (this.vmixManifestErrors.get(canonical) !== message) {
+        this.vmixManifestErrors.set(canonical, message)
+        this.ledger.addActivity('warning', `${basename(path)} is not ready: ${message}`)
         this.onChange()
       }
-    })().finally(() => this.pendingVmixProbes.delete(fileId))
-    this.pendingVmixProbes.set(fileId, operation)
+    }).finally(() => {
+      if (this.pendingVmixManifests.get(canonical) === operation) this.pendingVmixManifests.delete(canonical)
+    })
+    this.pendingVmixManifests.set(canonical, operation)
     return operation
   }
-  private async tryCompleteVmixFinalization(): Promise<void> {
-    if (!this.vmixSessionId || !this.vmixFinalizationStartedAt) return
-    await this.scanVmixLocations()
-    const session = this.ledger.getSession(this.vmixSessionId)
-    if (!session) return
-    const includedFiles = session.files.filter((file) => file.uploadStatus !== 'excluded')
-    if (includedFiles.some((file) => file.stabilityStatus === 'missing')) {
-      this.ledger.updateSession(session.id, { status: 'needs_review', errorMessage: 'One or more recording files are missing.' })
-      return this.closeVmixSession()
+  private async ingestVmixManifestWhenReady(path: string): Promise<void> {
+    const xml = await fs.readFile(path, 'utf8')
+    const filenames = parseVmixManifestMediaNames(xml)
+    const locations = [...this.vmixLocations()].sort((left, right) => Number(Boolean(right.filenameFilter)) - Number(Boolean(left.filenameFilter)))
+    const directoryEntries = new Map<string, Map<string, string>>()
+    for (const directory of new Set(locations.map((location) => location.path))) {
+      const entries = new Map<string, string>()
+      for (const name of await fs.readdir(directory)) entries.set(process.platform === 'win32' ? name.toLowerCase() : name, name)
+      directoryEntries.set(directory, entries)
     }
-    const pending = includedFiles.filter((file) => file.stabilityStatus !== 'stable')
-    if (pending.length) {
-      pending.forEach((file) => void this.probeVmixFile(file.id))
-      if (Date.now() - this.vmixFinalizationStartedAt >= 10 * 60_000) {
-        this.ledger.updateSession(session.id, { status: 'needs_review', errorMessage: 'File finalization did not finish within ten minutes.' })
-        return this.closeVmixSession()
+    const resolvedPaths: Array<{ path: string; location: RecordingLocation }> = []
+    for (const filename of filenames) {
+      let match: { path: string; location: RecordingLocation } | undefined
+      for (const location of locations) {
+        const actual = directoryEntries.get(location.path)?.get(process.platform === 'win32' ? filename.toLowerCase() : filename)
+        if (!actual) continue
+        const candidate = join(location.path, actual)
+        if (eligibleForLocation(candidate, location)) { match = { path: candidate, location }; break }
       }
-      return this.resetVmixFinalizationGrace()
+      if (!match) throw new Error(`Referenced media file was not found in a configured location: ${filename}`)
+      if (this.ledger.getByPath(match.path)) throw new Error(`Referenced media file already belongs to another session: ${filename}`)
+      resolvedPaths.push(match)
     }
-    if (!includedFiles.some((file) => file.sourceRole === 'primary')) {
-      this.ledger.updateSession(session.id, { status: 'needs_review', errorMessage: 'No primary recording was discovered.' })
-      return this.closeVmixSession()
+    const resolvedFiles = await Promise.all(resolvedPaths.map(async (file) => ({ ...file, stats: await this.stableFile(file.path) })))
+    const manifestStats = await fs.stat(path)
+    const settings = this.settings.get()
+    const startedAt = new Date(Math.min(...resolvedFiles.map((file) => file.stats.birthtimeMs || file.stats.mtimeMs)))
+    const folder = [settings.descriptDestinationRoot, recordingDate(startedAt, settings.recordingTimezone, settings.recordingDateFormat)].filter(Boolean).join('/')
+    const usedKeys = new Set<string>()
+    const segmentIndexes = new Map<string, number>()
+    const files = resolvedFiles.map((file) => {
+      const filename = basename(file.path)
+      const mediaKey = uniqueMediaKeyFromSet(usedKeys, file.location.label, filename)
+      const segmentIndex = segmentIndexes.get(file.location.id) ?? 0
+      segmentIndexes.set(file.location.id, segmentIndex + 1)
+      return {
+        locationId: file.location.id, sourceLabel: file.location.label, sourceRole: file.location.role,
+        localPath: file.path, originalFilename: filename, descriptMediaKey: mediaKey, contentType: contentType(file.path),
+        fileSize: file.stats.size, modifiedAt: file.stats.mtime.toISOString(), segmentIndex,
+        stabilityStatus: 'stable' as const, uploadStatus: 'pending' as const
+      }
+    })
+    const hasPrimary = files.some((file) => file.sourceRole === 'primary')
+    const session = this.ledger.createSession({
+      recorderType: 'vmix', status: hasPrimary ? 'ready' : 'needs_review', sessionStart: startedAt.toISOString(),
+      sessionEnd: manifestStats.mtime.toISOString(), finalizationSource: 'filesystem',
+      descriptFolderPath: folder, descriptProjectName: projectName(startedAt, settings.recordingTimezone),
+      descriptProjectId: null, descriptJobId: null,
+      configurationSnapshot: JSON.stringify({
+        recorderType: 'vmix', confirmation: 'multicorder_manifest', manifestPath: path,
+        host: settings.vmixHost, port: settings.vmixPort, useApi: settings.vmixUseApi, locations
+      })
+    }, files)
+    const canonical = canonicalPath(path)
+    this.vmixManifestBaseline.add(canonical)
+    this.vmixManifestErrors.delete(canonical)
+    if (!hasPrimary) {
+      this.ledger.updateSession(session.id, { errorMessage: 'No primary recording was referenced by the MultiCorder manifest.' })
+      this.ledger.addActivity('warning', `MultiCorder manifest needs review: ${basename(path)}.`)
+    } else {
+      this.ledger.addActivity('success', `MultiCorder manifest ready: ${files.length} file${files.length === 1 ? '' : 's'} from ${basename(path)}.`)
+      void this.onRecordingReady(session).catch(() => this.onChange())
     }
-    this.ledger.updateSession(session.id, { status: 'ready', errorMessage: null })
-    this.ledger.addActivity('success', `vMix session ready: ${session.files.length} file${session.files.length === 1 ? '' : 's'}.`)
-    const ready = this.ledger.getSession(session.id)!
-    await this.closeVmixSession()
-    void this.onRecordingReady(ready).catch(() => this.onChange())
-  }
-  private async closeVmixSession(): Promise<void> {
-    this.vmixSessionId = null; this.vmixFalseSince = null; this.vmixFinalizationStartedAt = null
-    this.activeVmixLocations = null
-    if (this.vmixFinalizationTimer) clearTimeout(this.vmixFinalizationTimer)
-    this.vmixFinalizationTimer = null
-    await this.refreshVmixBaseline()
     this.onChange()
+  }
+  private async stableFile(path: string): Promise<Stats> {
+    let stats = await fs.stat(path)
+    if (!stats.isFile() || stats.size === 0) throw new Error(`${basename(path)} is empty or unavailable.`)
+    for (let probe = 1; probe < 3; probe += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, FILE_STABILITY_DELAY_MS))
+      const next = await fs.stat(path)
+      if (!next.isFile() || next.size === 0 || next.size !== stats.size || next.mtimeMs !== stats.mtimeMs) {
+        throw new Error(`${basename(path)} is still changing.`)
+      }
+      stats = next
+    }
+    return stats
   }
   async ingest(path: string): Promise<void> {
     if (!SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase()) || this.ledger.getByPath(path)) return
@@ -611,19 +493,6 @@ export class RecordingWatcher {
   }
 }
 
-function snapshotLocations(session: CaptureSession): RecordingLocation[] | null {
-  try {
-    const snapshot = JSON.parse(session.configurationSnapshot) as { locations?: unknown }
-    if (!Array.isArray(snapshot.locations)) return null
-    return snapshot.locations.filter((location): location is RecordingLocation => {
-      if (!location || typeof location !== 'object') return false
-      const value = location as Partial<RecordingLocation>
-      return typeof value.id === 'string' && typeof value.path === 'string' && typeof value.label === 'string' &&
-        (value.role === 'primary' || value.role === 'iso') && value.enabled !== false
-    })
-  } catch { return null }
-}
-
 function canonicalPath(path: string): string {
   const value = resolve(path)
   return process.platform === 'win32' ? value.toLowerCase() : value
@@ -636,14 +505,14 @@ function eligibleForLocation(path: string, location: RecordingLocation): boolean
   const escaped = location.filenameFilter.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
   return new RegExp(`^${escaped}$`, process.platform === 'win32' ? 'i' : '').test(name)
 }
-function uniqueMediaKey(session: CaptureSession, sourceLabel: string, filename: string): string {
+function uniqueMediaKeyFromSet(used: Set<string>, sourceLabel: string, filename: string): string {
   const extension = extname(filename)
   const stem = filename.slice(0, filename.length - extension.length)
   const base = `${sourceLabel} — ${stem}`
   let candidate = `${base}${extension}`
   let suffix = 2
-  const used = new Set(session.files.map((file) => file.descriptMediaKey.toLowerCase()))
   while (used.has(candidate.toLowerCase())) candidate = `${base} (${suffix++})${extension}`
+  used.add(candidate.toLowerCase())
   return candidate
 }
 

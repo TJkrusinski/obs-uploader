@@ -1,6 +1,6 @@
 {
   "name": "obs-descript-uploader",
-  "version": "0.1.7",
+  "version": "1.0.0",
   "description": "A desktop relay from OBS recordings to Descript.",
   "author": "OBS Upload",
   "main": "dist-electron/main/main.js",
@@ -10,6 +10,7 @@
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.main.json --watch\" \"wait-on tcp:5173 file:dist-electron/main/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "tsc -p tsconfig.main.json && vite build && electron-builder",
     "build:unpacked": "tsc -p tsconfig.main.json && vite build && electron-builder --dir",
+    "test-local": "tsc -p tsconfig.main.json && node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "preview": "vite preview"
   },
