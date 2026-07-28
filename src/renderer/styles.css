@@ -30,6 +30,7 @@ button { cursor: pointer; }
 .notice.success { border-color: #2f5541; color: #a9d3b9; }
 .notice.error { border-color: #663138; color: #eca5a8; }
 .notice button { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 20px; }
+.notice.inline-notice { margin: 4px 0 0; padding: 9px 11px; }
 
 .setup-callout, .connection-card, .stat-card, .panel, .setting-card, .help-card { border: 1px solid #292929; border-radius: 5px; background: #0a0a0a; box-shadow: none; }
 .setup-callout { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; padding: 16px; }
@@ -136,7 +137,7 @@ button { cursor: pointer; }
 .folder-field { display: flex; gap: 8px; }.folder-field input { flex: 1; }.preview-box { display: flex; align-items: center; gap: 8px; border: 1px solid #303030; border-radius: 3px; padding: 10px; background: #0d0d0d; color: #c7c7c7; font-size: 13px; }.inline-warning { margin: 0 0 7px; color: #cdb66a; font-size: 11px; }
 .split-fields { display: grid; grid-template-columns: 1fr 100px; gap: 9px; }.split-fields > div { display: grid; gap: 7px; }
 .help-card { padding: 20px; }.help-icon { margin-bottom: 15px; }.help-card ol { margin: 13px 0; padding-left: 18px; color: #999; font-size: 12px; line-height: 1.65; }.help-card p { margin: 15px 0 0; border-top: 1px solid #292929; padding-top: 15px; color: #777; font-size: 11px; line-height: 1.45; }
-.settings-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin: 20px 0 -48px; border-top: 1px solid #292929; padding: 14px 0; background: #050505ee; }.settings-footer > div { display: flex; gap: 8px; }
+.settings-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin: 20px 0 -48px; border-top: 1px solid #292929; padding: 14px 0; background: #050505ee; }.settings-footer > div { display: flex; gap: 8px; }.settings-footer-feedback { flex: 1; align-items: center; }.settings-footer-feedback .inline-notice { width: min(100%, 520px); margin: 0; }
 .spin { animation: spin 1s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1100px) { .connection-grid { grid-template-columns: repeat(2, 1fr); }.stat-grid { grid-template-columns: repeat(3, 1fr); }.dashboard-grid, .settings-layout { grid-template-columns: 1fr; }.settings-aside { display: none; } }

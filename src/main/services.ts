@@ -236,7 +236,7 @@ export class RecordingWatcher {
     this.stop()
     const settings = this.settings.get()
     const directories: string[] = []
-    if (settings.monitorObs) {
+    if (settings.recorderType === 'obs') {
       if (!settings.recordingsDirectory) throw new Error('Connect OBS or choose its recordings folder before monitoring it.')
       await fs.access(settings.recordingsDirectory)
       directories.push(settings.recordingsDirectory)
@@ -244,7 +244,7 @@ export class RecordingWatcher {
         if (filename && !this.obsStopEventsAvailable) void this.ingest(join(settings.recordingsDirectory!, filename.toString()))
       })
     }
-    if (settings.monitorVmix) {
+    if (settings.recorderType === 'vmix') {
       const locations = settings.vmixRecordingLocations.filter((location) => location.enabled)
       if (!locations.length) throw new Error('Add at least one enabled vMix recording location.')
       for (const location of locations) {
@@ -256,7 +256,7 @@ export class RecordingWatcher {
       }
       await this.refreshVmixBaseline()
     }
-    if (!directories.length) throw new Error('Enable OBS, vMix, or both before starting monitoring.')
+    if (!directories.length) throw new Error('Choose OBS or vMix before starting monitoring.')
     this.scanTimer = setInterval(() => void this.scan(), 10_000)
     this.active = true
     await this.recoverVmixSession()
@@ -286,8 +286,8 @@ export class RecordingWatcher {
   async scan(): Promise<void> {
     const settings = this.settings.get()
     const dir = settings.recordingsDirectory
-    if (settings.monitorObs && dir && !this.obsStopEventsAvailable) await this.scanDirectory(dir)
-    if (settings.monitorVmix) {
+    if (settings.recorderType === 'obs' && dir && !this.obsStopEventsAvailable) await this.scanDirectory(dir)
+    if (settings.recorderType === 'vmix') {
       if (this.vmixSessionId) {
         await this.scanVmixLocations()
         if (!settings.vmixUseApi && Date.now() - this.lastVmixActivity >= 60_000) await this.enterVmixFinalization('filesystem')
@@ -306,7 +306,7 @@ export class RecordingWatcher {
     if (this.active) await this.ingest(path)
   }
   async vmixStateChanged(recording: boolean, multiCorder: boolean): Promise<void> {
-    if (!this.active || !this.settings.get().monitorVmix) return
+    if (!this.active || this.settings.get().recorderType !== 'vmix') return
     if (recording || multiCorder) {
       this.vmixFalseSince = null
       if (!this.vmixSessionId) await this.openVmixSession('vmix_api')

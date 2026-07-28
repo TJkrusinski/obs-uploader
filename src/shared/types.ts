@@ -32,8 +32,7 @@ export interface AppSettings {
   reconciliationDirectory: string | null
   obsHost: string
   obsPort: number
-  monitorObs: boolean
-  monitorVmix: boolean
+  recorderType: RecorderType
   vmixHost: string
   vmixPort: number
   vmixUseApi: boolean

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
 import { promises as fs } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import type { AppSnapshot, ConnectionState, SettingsInput, UpdateState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
 import { DescriptService, isBeforeRecordingDay, isSameRecordingDay, ObsService, RecordingWatcher, VmixService } from './services.js'
@@ -29,7 +29,11 @@ function snapshot(): AppSnapshot {
     update: updateState
   }
 }
-function broadcast(): void { window?.webContents.send('app:stateChanged', snapshot()) }
+function broadcast(): void {
+  const target = window
+  if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return
+  target.webContents.send('app:stateChanged', snapshot())
+}
 
 async function connectObsAndSync(input: { host: string; port: number; password?: string }): Promise<{ ok: boolean; message: string; recordingDirectory?: string }> {
   const result = await obs.connect(input)
@@ -43,9 +47,9 @@ async function connectObsAndSync(input: { host: string; port: number; password?:
 
 async function initializeRecordersAndWatcher(): Promise<void> {
   const current = settings.get()
-  if (current.monitorObs) await connectObsAndSync({ host: current.obsHost, port: current.obsPort })
-  if (current.monitorVmix && current.vmixUseApi) vmix.start({ host: current.vmixHost, port: current.vmixPort })
-  if ((current.monitorObs && current.recordingsDirectory) || (current.monitorVmix && current.vmixRecordingLocations.some((location) => location.enabled))) {
+  if (current.recorderType === 'obs') await connectObsAndSync({ host: current.obsHost, port: current.obsPort })
+  if (current.recorderType === 'vmix' && current.vmixUseApi) vmix.start({ host: current.vmixHost, port: current.vmixPort })
+  if ((current.recorderType === 'obs' && current.recordingsDirectory) || (current.recorderType === 'vmix' && current.vmixRecordingLocations.some((location) => location.enabled))) {
     if (!watcher.isWatching()) await watcher.start()
   }
 }
@@ -93,6 +97,7 @@ async function createWindow(): Promise<void> {
     backgroundColor: '#0a1020',
     webPreferences: { preload: join(import.meta.dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false }
   })
+  window.on('closed', () => { window = null })
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl) await window.loadURL(devUrl)
   else await window.loadFile(join(import.meta.dirname, '../../dist/index.html'))
@@ -237,8 +242,8 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('before-quit', () => { vmix?.stop(); watcher?.stop(); ledger?.close() })
 
 async function validateRecorderSettings(input: SettingsInput): Promise<void> {
-  if (!input.monitorObs && !input.monitorVmix) throw new Error('Enable OBS, vMix, or both.')
-  if (input.monitorVmix) {
+  if (input.recorderType !== 'obs' && input.recorderType !== 'vmix') throw new Error('Choose OBS or vMix.')
+  if (input.recorderType === 'vmix') {
     const locations = input.vmixRecordingLocations.filter((location) => location.enabled)
     if (!locations.length) throw new Error('Add at least one enabled vMix recording location.')
     if (locations.filter((location) => location.role === 'primary').length !== 1) throw new Error('Exactly one enabled vMix location must be primary.')
@@ -250,9 +255,6 @@ async function validateRecorderSettings(input: SettingsInput): Promise<void> {
       if (labels.has(label)) throw new Error(`The vMix location label "${location.label}" is duplicated.`)
       labels.add(label)
       const path = process.platform === 'win32' ? location.path.trim().toLowerCase() : location.path.trim()
-      const obsPath = input.recordingsDirectory ? (process.platform === 'win32' ? resolve(input.recordingsDirectory).toLowerCase() : resolve(input.recordingsDirectory)) : null
-      const resolvedPath = process.platform === 'win32' ? resolve(location.path).toLowerCase() : resolve(location.path)
-      if (input.monitorObs && obsPath === resolvedPath) throw new Error('OBS and vMix cannot monitor the same directory because files would be ambiguous.')
       const pathKey = `${path}\0${location.filenameFilter?.trim().toLowerCase() ?? ''}`
       if (paths.has(pathKey)) throw new Error(`The vMix recording location "${location.path}" is duplicated.`)
       paths.add(pathKey)

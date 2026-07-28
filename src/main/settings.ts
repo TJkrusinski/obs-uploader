@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import keytar from 'keytar'
-import type { AppSettings, RecordingDateFormat, SettingsInput } from '../shared/types.js'
+import type { AppSettings, RecorderType, RecordingDateFormat, SettingsInput } from '../shared/types.js'
 
 const SERVICE_NAME = 'OBS Descript Uploader'
 const DESCRIPT_ACCOUNT = 'descript-api-token'
@@ -15,8 +15,7 @@ const defaults = (): AppSettings => ({
   reconciliationDirectory: null,
   obsHost: '127.0.0.1',
   obsPort: 4455,
-  monitorObs: true,
-  monitorVmix: false,
+  recorderType: 'obs',
   vmixHost: '127.0.0.1',
   vmixPort: 8088,
   vmixUseApi: true,
@@ -37,6 +36,13 @@ function normalizeDateFormat(input: string): RecordingDateFormat {
   throw new Error('Choose a supported date-folder format.')
 }
 
+function normalizeRecorderType(input: Partial<AppSettings> & { monitorVmix?: boolean }): RecorderType {
+  if (input.recorderType === 'obs' || input.recorderType === 'vmix') return input.recorderType
+  // OBS was enabled by default in legacy settings, so a legacy vMix selection
+  // takes precedence when both old checkboxes were saved.
+  return input.monitorVmix ? 'vmix' : 'obs'
+}
+
 export class SettingsStore {
   private readonly filePath: string
   private settings: AppSettings = defaults()
@@ -47,8 +53,14 @@ export class SettingsStore {
 
   async load(): Promise<AppSettings> {
     try {
-      const saved = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<AppSettings> & { recordingDateFormat?: string }
-      this.settings = { ...defaults(), ...saved, recordingDateFormat: normalizeDateFormat(saved.recordingDateFormat ?? defaults().recordingDateFormat) }
+      const saved = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<AppSettings> & { recordingDateFormat?: string; monitorObs?: boolean; monitorVmix?: boolean }
+      const { monitorObs: _monitorObs, monitorVmix: _monitorVmix, ...current } = saved
+      this.settings = {
+        ...defaults(),
+        ...current,
+        recorderType: normalizeRecorderType(saved),
+        recordingDateFormat: normalizeDateFormat(saved.recordingDateFormat ?? defaults().recordingDateFormat)
+      }
     } catch {
       this.settings = defaults()
     }
@@ -66,8 +78,7 @@ export class SettingsStore {
       reconciliationDirectory: input.reconciliationDirectory || null,
       obsHost: input.obsHost.trim() || '127.0.0.1',
       obsPort: Number(input.obsPort) || 4455,
-      monitorObs: Boolean(input.monitorObs),
-      monitorVmix: Boolean(input.monitorVmix),
+      recorderType: normalizeRecorderType(input),
       vmixHost: input.vmixHost.trim() || '127.0.0.1',
       vmixPort: Number(input.vmixPort) || 8088,
       vmixUseApi: Boolean(input.vmixUseApi),
