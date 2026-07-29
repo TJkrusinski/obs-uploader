@@ -21,7 +21,7 @@ A session may include:
 - Zero or more ISO recordings.
 - Multiple sequential file segments from any source.
 - Files distributed across multiple configured directories.
-- Optional audio-only recordings.
+- Video recordings only; audio-only files are not eligible for upload.
 - Recordings produced by OBS or vMix.
 
 The primary recording’s segments will populate the Descript composition named `Recording`. ISO files will be added to the same project as media assets but will not automatically be arranged in the main composition.
@@ -637,15 +637,7 @@ Initial eligible video containers:
 - `.mkv`
 - `.webm`
 
-Initial eligible audio containers:
-
-- `.wav`
-- `.mp3`
-- `.m4a`
-- `.aiff`
-- `.flac`
-- `.opus`
-- `.aac`
+Audio-only containers are not eligible for discovery or upload.
 
 Known unsupported vMix outputs include AVI, MXF, and WMV. Descript also requires compatible codecs inside supported containers. See [Descript supported file types](https://help.descript.com/hc/en-us/articles/10164098416909-Supported-file-types).
 

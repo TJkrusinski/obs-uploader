@@ -10,11 +10,17 @@ import { SettingsStore } from './settings.js'
 import { parseVmixManifestMediaNames, vmixProjectNameFromManifest } from './vmix-manifest.js'
 import { inspectVmixProjectContents, type VmixProjectContents } from './vmix-reconciliation.js'
 
-const SUPPORTED_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.wav', '.mp3', '.m4a', '.aiff', '.flac', '.opus', '.aac'])
+const SUPPORTED_VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.mkv', '.webm'])
 const FILE_STABILITY_DELAY_MS = 2_000
 
 type RemoteProject = { id: string; name: string; folder_path: string }
 type RemoteProjectDetails = RemoteProject & VmixProjectContents
+
+async function descriptApiError(context: string, response: Response): Promise<Error> {
+  const body = await response.text()
+  const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
+  return new Error(`${context} (${status})${body ? `: ${body}` : ''}`)
+}
 
 function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(date)
@@ -46,8 +52,7 @@ function projectName(date: Date, timeZone: string): string {
 function contentType(path: string): string {
   return ({
     '.mkv': 'video/x-matroska', '.mp4': 'video/mp4', '.m4v': 'video/x-m4v', '.mov': 'video/quicktime',
-    '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4',
-    '.aiff': 'audio/aiff', '.flac': 'audio/flac', '.opus': 'audio/opus', '.aac': 'audio/aac'
+    '.webm': 'video/webm'
   } as Record<string, string>)[extname(path).toLowerCase()] ?? 'application/octet-stream'
 }
 
@@ -62,7 +67,7 @@ export class DescriptService {
     if (!token) return { ok: false, message: 'Add a Descript API token first.' }
     const response = await fetch('https://descriptapi.com/v1/projects?limit=1', { headers: { Authorization: `Bearer ${token}` } })
     if (response.ok) return { ok: true, message: 'Token verified. Your destination folder will be created on the first import if needed.' }
-    return { ok: false, message: `Descript rejected this token (${response.status}).` }
+    return { ok: false, message: (await descriptApiError('Descript rejected this token', response)).message }
   }
 
   async reconcile(): Promise<void> {
@@ -104,6 +109,10 @@ export class DescriptService {
       const current = this.ledger.getSession(session.id)
       if (!this.settings.get().uploadsEnabled || !current || current.uploadExcluded || current.status !== 'ready') return
       const files = current.files.filter((file) => file.uploadStatus !== 'excluded')
+      const nonVideoFiles = files.filter((file) => !file.contentType.startsWith('video/'))
+      if (nonVideoFiles.length) {
+        throw new Error(`Only video files can be uploaded. Remove or exclude: ${nonVideoFiles.map((file) => `${file.sourceLabel} — ${file.originalFilename}`).join('; ')}`)
+      }
       const filesToUpload = files.filter((file) => file.uploadStatus !== 'uploaded')
       const primary = files.filter((file) => file.sourceRole === 'primary')
       if (!primary.length) throw new Error('This session has no primary recording.')
@@ -116,7 +125,7 @@ export class DescriptService {
       const response = await fetch('https://descriptapi.com/v1/jobs/import/project_media', {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
       })
-      if (!response.ok) throw new Error(`Descript import request failed (${response.status}): ${await response.text()}`)
+      if (!response.ok) throw await descriptApiError('Descript import request failed', response)
       const result = await response.json() as { job_id: string; project_id: string; upload_urls?: Record<string, { upload_url: string }> }
       controller.signal.throwIfAborted()
       this.ledger.updateSession(session.id, { descriptJobId: result.job_id, descriptProjectId: result.project_id })
@@ -128,8 +137,8 @@ export class DescriptService {
         if (!uploadUrl) throw new Error(`Descript did not return an upload target for ${file.sourceLabel} — ${file.originalFilename}.`)
         this.ledger.updateFile(file.id, { uploadStatus: 'uploading', errorMessage: null })
         const stream = Readable.toWeb(createReadStream(file.localPath)) as ReadableStream
-        const upload = await fetch(uploadUrl, { method: 'PUT', body: stream, duplex: 'half', headers: { 'Content-Type': file.contentType, 'Content-Length': String(source.size) }, signal: controller.signal } as RequestInit & { duplex: 'half' })
-        if (!upload.ok) throw new Error(`File transfer to Descript failed (${upload.status}).`)
+        const upload = await fetch(uploadUrl, { method: 'PUT', body: stream, duplex: 'half', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(source.size) }, signal: controller.signal } as RequestInit & { duplex: 'half' })
+        if (!upload.ok) throw await descriptApiError(`File transfer to Descript failed for ${file.sourceLabel} — ${file.originalFilename}`, upload)
         this.ledger.updateFile(file.id, { uploadStatus: 'uploaded', errorMessage: null })
       }
       controller.signal.throwIfAborted()
@@ -140,7 +149,7 @@ export class DescriptService {
       const uploading = this.ledger.getSession(session.id)?.files.find((file) => file.uploadStatus === 'uploading')
       if (uploading) this.ledger.updateFile(uploading.id, { uploadStatus: 'failed', errorMessage: error instanceof Error ? error.message : String(error) })
       this.ledger.updateSession(session.id, { status: 'failed', errorMessage: error instanceof Error ? error.message : String(error) })
-      this.ledger.addActivity('error', `Upload failed for session ${session.descriptProjectName}.`)
+      this.ledger.addActivity('error', `Upload failed for session ${session.descriptProjectName}: ${error instanceof Error ? error.message : String(error)}`)
       throw error
     } finally {
       if (this.activeUploads.get(session.id) === operation) this.activeUploads.delete(session.id)
@@ -163,9 +172,7 @@ export class DescriptService {
     const response = await fetch(`https://descriptapi.com/v1/jobs/${session.descriptJobId}`, {
       method: 'DELETE', headers: { Authorization: `Bearer ${token}` }
     })
-    if (!response.ok && response.status !== 404) {
-      throw new Error(`The upload was stopped locally, but Descript could not cancel the remote job (${response.status}).`)
-    }
+    if (!response.ok && response.status !== 404) throw await descriptApiError('The upload was stopped locally, but Descript could not cancel the remote job', response)
   }
 
   async stopLocalWork(sessions: CaptureSession[]): Promise<void> {
@@ -189,7 +196,7 @@ export class DescriptService {
       url.searchParams.set('limit', '100')
       if (cursor) url.searchParams.set('cursor', cursor)
       const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      if (!response.ok) throw new Error(`Unable to list Descript projects (${response.status}).`)
+      if (!response.ok) throw await descriptApiError('Unable to list Descript projects', response)
       const page = await response.json() as { data: RemoteProject[]; pagination?: { next_cursor?: string } }
       results.push(...page.data); cursor = page.pagination?.next_cursor
     } while (cursor)
@@ -198,10 +205,17 @@ export class DescriptService {
 
   private async reconcileVmixProject(token: string, session: CaptureSession, project: RemoteProject): Promise<void> {
     const response = await fetch(`https://descriptapi.com/v1/projects/${project.id}`, { headers: { Authorization: `Bearer ${token}` } })
-    if (!response.ok) throw new Error(`Unable to inspect Descript project ${project.name} (${response.status}).`)
+    if (!response.ok) throw await descriptApiError(`Unable to inspect Descript project ${project.name}`, response)
     const details = await response.json() as RemoteProjectDetails
     const inspection = inspectVmixProjectContents(session.files, details)
     for (const fileId of inspection.uploadedFileIds) this.ledger.updateFile(fileId, { uploadStatus: 'uploaded', errorMessage: null })
+    if (inspection.invalidFiles.length) {
+      const message = `Descript returned incomplete or incorrectly classified media: ${inspection.invalidFiles.map((file) => `${file.mediaKey} is ${file.actualType}; expected ${file.expectedType}`).join('; ')}. Reset and retry to upload into a fresh project.`
+      for (const file of inspection.invalidFiles) this.ledger.updateFile(file.id, { uploadStatus: 'failed', errorMessage: message })
+      this.ledger.updateSession(session.id, { status: 'failed', descriptProjectId: project.id, errorMessage: message })
+      this.ledger.addActivity('error', `${session.descriptProjectName}: ${message}`)
+      return
+    }
     this.ledger.updateSession(session.id, { descriptProjectId: project.id, errorMessage: null })
     if (inspection.complete) {
       this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: project.id, errorMessage: null })
@@ -216,9 +230,9 @@ export class DescriptService {
       this.activePolls.set(session.id, controllers)
       try {
         const response = await fetch(`https://descriptapi.com/v1/jobs/${session.descriptJobId}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
-        if (!response.ok) continue
-        const job = await response.json() as { job_state?: string; result?: { status?: string } }
-        if (job.job_state !== 'stopped') continue
+        if (!response.ok) throw await descriptApiError(`Unable to check Descript job ${session.descriptJobId}`, response)
+        const job = await response.json() as { job_state?: string; result?: { status?: string; [key: string]: unknown } }
+        if (!['stopped', 'cancelled', 'canceled'].includes(job.job_state ?? '')) continue
         const current = this.ledger.getSession(session.id)
         if (!current || !['processing', 'needs_review'].includes(current.status) || current.descriptJobId !== session.descriptJobId) continue
         if (job.result?.status === 'success') {
@@ -226,7 +240,10 @@ export class DescriptService {
           this.ledger.updateSession(session.id, { status: 'completed', errorMessage: null })
           this.ledger.addActivity('success', `${session.descriptProjectName} finished processing in Descript.`)
         } else {
-          this.ledger.updateSession(session.id, { status: 'failed', errorMessage: 'Descript processing did not complete successfully.' })
+          const details = job.result ? JSON.stringify(job.result) : JSON.stringify(job)
+          const message = `Descript processing did not complete successfully: ${details}`
+          this.ledger.updateSession(session.id, { status: 'failed', errorMessage: message })
+          this.ledger.addActivity('error', `${session.descriptProjectName}: ${message}`)
         }
       } catch (error) {
         if (!controller.signal.aborted) throw error
@@ -403,7 +420,7 @@ export class RecordingWatcher {
       const actual = directoryEntries.get(process.platform === 'win32' ? filename.toLowerCase() : filename)
       if (!actual) throw new Error(`Referenced media file was not found beside the XML manifest: ${filename}`)
       const mediaPath = join(directory, actual)
-      if (!SUPPORTED_EXTENSIONS.has(extname(mediaPath).toLowerCase())) throw new Error(`Referenced media file is not supported: ${filename}`)
+      if (!SUPPORTED_VIDEO_EXTENSIONS.has(extname(mediaPath).toLowerCase())) throw new Error(`Referenced media file is not a supported video: ${filename}`)
       if (this.ledger.getByPath(mediaPath)) throw new Error(`Referenced media file already belongs to another session: ${filename}`)
       resolvedPaths.push(mediaPath)
     }
@@ -461,7 +478,7 @@ export class RecordingWatcher {
     return stats
   }
   async ingest(path: string): Promise<void> {
-    if (!SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase()) || this.ledger.getByPath(path)) return
+    if (!SUPPORTED_VIDEO_EXTENSIONS.has(extname(path).toLowerCase()) || this.ledger.getByPath(path)) return
     const pending = this.pendingIngestions.get(path)
     if (pending) return pending
     const ingestion = this.ingestWhenReady(path).finally(() => {

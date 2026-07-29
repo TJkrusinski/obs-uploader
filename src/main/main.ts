@@ -113,6 +113,9 @@ app.whenReady().then(async () => {
     try {
       if (session.recorderType === 'vmix') await descript.reconcile()
       else await descript.upload(session)
+    } catch (error) {
+      if (session.recorderType === 'vmix') ledger.addActivity('error', error instanceof Error ? error.message : String(error))
+      throw error
     } finally { broadcast() }
   })
   obs = new ObsService(settings, () => broadcast(), (path) => watcher.recordingStopped(path), (available) => watcher.setObsStopEventsAvailable(available))
@@ -123,7 +126,10 @@ app.whenReady().then(async () => {
   void initializeRecordersAndWatcher().catch(() => {
     if (!watcher.isWatching()) void watcher.start().catch(() => undefined)
   })
-  setInterval(() => void descript.reconcile().then(broadcast).catch(() => undefined), 60_000)
+  setInterval(() => void descript.reconcile().then(broadcast).catch((error) => {
+    ledger.addActivity('error', error instanceof Error ? error.message : String(error))
+    broadcast()
+  }), 60_000)
 })
 
 function registerIpc(): void {
@@ -192,13 +198,17 @@ function registerIpc(): void {
     return hidden
   })
   ipcMain.handle('sessions:reset', async (_event, id: string) => {
-    const session = ledger.getSession(id); if (!session) throw new Error('Session not found.')
+    let session = ledger.getSession(id); if (!session) throw new Error('Session not found.')
     if (session.status === 'completed') throw new Error('Completed sessions cannot be reset.')
-    if (session.descriptJobId) throw new Error(`This session already owns Descript job ${session.descriptJobId}. Reconciliation must resolve it before a replacement import can be created.`)
     if (['ready', 'uploading', 'processing'].includes(session.status)) await descript.cancel(session)
-    ledger.updateSession(id, { status: 'ready', errorMessage: null, descriptJobId: null, descriptProjectId: null })
+    session = ledger.getSession(id)!
+    if (session.descriptJobId && !['canceled', 'failed'].includes(session.status)) {
+      throw new Error(`This session still owns active Descript job ${session.descriptJobId}. Cancel it before creating a replacement import.`)
+    }
+    const retryName = session.descriptJobId ? ledger.retryProjectName(session) : session.descriptProjectName
+    ledger.updateSession(id, { status: 'ready', errorMessage: null, descriptProjectName: retryName, descriptJobId: null, descriptProjectId: null })
     session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => ledger.updateFile(file.id, { uploadStatus: 'pending', errorMessage: null }))
-    ledger.addActivity('info', `Reset ${session.descriptProjectName} for retry.`)
+    ledger.addActivity('info', `Reset ${session.descriptProjectName} for retry${retryName === session.descriptProjectName ? '' : ` as ${retryName}`}.`)
     await descript.reconcile(); broadcast()
   })
   ipcMain.handle('sessions:cancel', async (_event, id: string) => {

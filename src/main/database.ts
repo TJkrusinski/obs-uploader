@@ -193,12 +193,20 @@ export class LedgerDatabase {
     while (exists.get(folderPath, `${requestedName}-${String(suffix).padStart(2, '0')}`)) suffix += 1
     return `${requestedName}-${String(suffix).padStart(2, '0')}`
   }
-  updateSession(id: string, values: Partial<Pick<CaptureSession, 'status' | 'sessionEnd' | 'finalizationSource' | 'errorMessage' | 'descriptProjectId' | 'descriptJobId'>>): void {
+  updateSession(id: string, values: Partial<Pick<CaptureSession, 'status' | 'sessionEnd' | 'finalizationSource' | 'errorMessage' | 'descriptProjectName' | 'descriptProjectId' | 'descriptJobId'>>): void {
     const columns = Object.keys(values)
     if (!columns.length) return
-    const names: Record<string, string> = { sessionEnd: 'session_end', finalizationSource: 'finalization_source', errorMessage: 'error_message', descriptProjectId: 'descript_project_id', descriptJobId: 'descript_job_id' }
+    const names: Record<string, string> = { sessionEnd: 'session_end', finalizationSource: 'finalization_source', errorMessage: 'error_message', descriptProjectName: 'descript_project_name', descriptProjectId: 'descript_project_id', descriptJobId: 'descript_job_id' }
     const set = columns.map((key) => `${names[key] ?? key} = @${key}`).join(', ')
     this.db.prepare(`UPDATE capture_sessions SET ${set}, updated_at = @updatedAt WHERE id = @id`).run({ ...values, id, updatedAt: new Date().toISOString() })
+  }
+  retryProjectName(session: CaptureSession): string {
+    const previousRetry = session.descriptProjectName.match(/ \(retry (\d+)\)$/)
+    const base = session.descriptProjectName.replace(/ \(retry \d+\)$/, '')
+    let retry = previousRetry ? Number(previousRetry[1]) + 1 : 2
+    const exists = this.db.prepare('SELECT 1 FROM capture_sessions WHERE id <> ? AND descript_folder_path = ? AND descript_project_name = ? LIMIT 1')
+    while (exists.get(session.id, session.descriptFolderPath, `${base} (retry ${retry})`)) retry += 1
+    return `${base} (retry ${retry})`
   }
   updateFile(id: string, values: Partial<Pick<SessionFile, 'sourceRole' | 'uploadStatus' | 'stabilityStatus' | 'errorMessage' | 'fileSize' | 'modifiedAt'>>): void {
     const columns = Object.keys(values)

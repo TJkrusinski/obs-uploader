@@ -3,9 +3,9 @@ import { test } from 'node:test'
 import { inspectVmixProjectContents } from '../dist-electron/main/vmix-reconciliation.js'
 
 const files = [
-  { id: 'one', descriptMediaKey: 'Camera 1.mp4', uploadStatus: 'pending' },
-  { id: 'two', descriptMediaKey: 'Camera 2.mp4', uploadStatus: 'pending' },
-  { id: 'excluded', descriptMediaKey: 'Excluded.mp4', uploadStatus: 'excluded' }
+  { id: 'one', descriptMediaKey: 'Camera 1.mp4', contentType: 'video/mp4', uploadStatus: 'pending' },
+  { id: 'two', descriptMediaKey: 'Camera 2.mp4', contentType: 'video/mp4', uploadStatus: 'pending' },
+  { id: 'excluded', descriptMediaKey: 'Excluded.mp4', contentType: 'video/mp4', uploadStatus: 'excluded' }
 ]
 
 test('reports which manifest files already exist in a project', () => {
@@ -15,6 +15,7 @@ test('reports which manifest files already exist in a project', () => {
   })
 
   assert.deepEqual(result.uploadedFileIds, ['one'])
+  assert.deepEqual(result.invalidFiles, [])
   assert.equal(result.complete, false)
 })
 
@@ -29,5 +30,24 @@ test('requires all listed files, the sequence, and Recording composition', () =>
   })
 
   assert.deepEqual(result.uploadedFileIds, ['one', 'two'])
+  assert.deepEqual(result.invalidFiles, [])
   assert.equal(result.complete, true)
+})
+
+test('rejects canceled import placeholders and wrong remote media types', () => {
+  const result = inspectVmixProjectContents(files, {
+    media_files: {
+      'Camera 1.mp4': { type: 'other' },
+      'Camera 2.mp4': { type: 'audio' },
+      'MultiCorder Sequence': { type: 'sequence' }
+    },
+    compositions: [{ id: 'composition', name: 'Recording' }]
+  })
+
+  assert.deepEqual(result.uploadedFileIds, [])
+  assert.deepEqual(result.invalidFiles, [
+    { id: 'one', mediaKey: 'Camera 1.mp4', expectedType: 'video', actualType: 'other' },
+    { id: 'two', mediaKey: 'Camera 2.mp4', expectedType: 'video', actualType: 'audio' }
+  ])
+  assert.equal(result.complete, false)
 })
