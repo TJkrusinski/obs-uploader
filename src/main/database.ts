@@ -5,7 +5,7 @@ import type {
   SessionFileStabilityStatus, SessionFileUploadStatus
 } from '../shared/types.js'
 
-type NewSession = Omit<CaptureSession, 'id' | 'errorMessage' | 'hidden' | 'createdAt' | 'updatedAt' | 'files'>
+type NewSession = Omit<CaptureSession, 'id' | 'errorMessage' | 'hidden' | 'uploadExcluded' | 'createdAt' | 'updatedAt' | 'files'>
 export type NewSessionFile = Omit<SessionFile, 'id' | 'sessionId' | 'errorMessage' | 'discoveredAt' | 'updatedAt'>
 
 export class LedgerDatabase {
@@ -29,6 +29,7 @@ export class LedgerDatabase {
         status TEXT NOT NULL,
         error_message TEXT,
         hidden INTEGER NOT NULL DEFAULT 0,
+        upload_excluded INTEGER NOT NULL DEFAULT 0,
         deleted INTEGER NOT NULL DEFAULT 0,
         discovered_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -100,14 +101,16 @@ export class LedgerDatabase {
     const columns = this.db.pragma('table_info(recordings)') as Array<{ name: string }>
     if (!columns.some((column) => column.name === 'hidden')) this.db.exec('ALTER TABLE recordings ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
     if (!columns.some((column) => column.name === 'deleted')) this.db.exec('ALTER TABLE recordings ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0')
+    const sessionColumns = this.db.pragma('table_info(capture_sessions)') as Array<{ name: string }>
+    if (!sessionColumns.some((column) => column.name === 'upload_excluded')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN upload_excluded INTEGER NOT NULL DEFAULT 0')
   }
   private migrateLegacyRecordings(): void {
     const migrate = this.db.transaction(() => {
       const rows = this.db.prepare('SELECT * FROM recordings').all() as any[]
       const insertSession = this.db.prepare(`
         INSERT OR IGNORE INTO capture_sessions
-        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,deleted,created_at,updated_at)
-        VALUES (@id,'obs',@status,@recorded_at,@session_end,'obs_event',@descript_folder_path,@descript_project_name,@descript_project_id,@descript_job_id,@snapshot,@error_message,@hidden,@deleted,@discovered_at,@updated_at)
+        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,upload_excluded,deleted,created_at,updated_at)
+        VALUES (@id,'obs',@status,@recorded_at,@session_end,'obs_event',@descript_folder_path,@descript_project_name,@descript_project_id,@descript_job_id,@snapshot,@error_message,@hidden,0,@deleted,@discovered_at,@updated_at)
       `)
       const insertFile = this.db.prepare(`
         INSERT OR IGNORE INTO session_files
@@ -148,8 +151,8 @@ export class LedgerDatabase {
     const insert = this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO capture_sessions
-        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,created_at,updated_at)
-        VALUES (@id,@recorderType,@status,@sessionStart,@sessionEnd,@finalizationSource,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@configurationSnapshot,NULL,0,@createdAt,@updatedAt)
+        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,upload_excluded,created_at,updated_at)
+        VALUES (@id,@recorderType,@status,@sessionStart,@sessionEnd,@finalizationSource,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@configurationSnapshot,NULL,0,0,@createdAt,@updatedAt)
       `).run({ ...session, descriptProjectName, id, createdAt: now, updatedAt: now })
       const statement = this.db.prepare(`
         INSERT INTO session_files
@@ -193,7 +196,7 @@ export class LedgerDatabase {
     this.db.prepare(`UPDATE session_files SET ${set}, updated_at = @updatedAt WHERE id = @id`).run({ ...values, id, updatedAt: new Date().toISOString() })
   }
   getPendingSessions(): CaptureSession[] {
-    return this.db.prepare("SELECT * FROM capture_sessions WHERE deleted = 0 AND status IN ('ready','uploading','processing') ORDER BY created_at ASC").all().map((row) => this.mapSession(row))
+    return this.db.prepare("SELECT * FROM capture_sessions WHERE deleted = 0 AND (status IN ('uploading','processing') OR (status = 'ready' AND upload_excluded = 0)) ORDER BY created_at ASC").all().map((row) => this.mapSession(row))
   }
   getRecoverableSessions(): CaptureSession[] {
     return this.db.prepare("SELECT * FROM capture_sessions WHERE deleted = 0 AND status IN ('recording','connection_lost','finalizing','ready','uploading','processing') ORDER BY created_at ASC").all().map((row) => this.mapSession(row))
@@ -209,6 +212,9 @@ export class LedgerDatabase {
   }
   setHidden(id: string, hidden: boolean): void {
     this.db.prepare('UPDATE capture_sessions SET hidden = ?, updated_at = ? WHERE id = ?').run(hidden ? 1 : 0, new Date().toISOString(), id)
+  }
+  setUploadExcluded(id: string, excluded: boolean): void {
+    this.db.prepare('UPDATE capture_sessions SET upload_excluded = ?, updated_at = ? WHERE id = ?').run(excluded ? 1 : 0, new Date().toISOString(), id)
   }
   setHiddenMany(ids: string[], hidden: boolean): number {
     if (!ids.length) return 0
@@ -254,6 +260,7 @@ export class LedgerDatabase {
       descriptFolderPath: row.descript_folder_path, descriptProjectName: row.descript_project_name,
       descriptProjectId: row.descript_project_id, descriptJobId: row.descript_job_id,
       configurationSnapshot: row.configuration_snapshot, errorMessage: row.error_message, hidden: Boolean(row.hidden),
+      uploadExcluded: Boolean(row.upload_excluded),
       createdAt: row.created_at, updatedAt: row.updated_at, files
     }
   }

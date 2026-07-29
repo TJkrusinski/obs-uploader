@@ -1,9 +1,9 @@
 import { createReadStream, promises as fs } from 'node:fs'
-import { basename, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { watch, type FSWatcher, type Stats } from 'node:fs'
 import OBSWebSocket, { EventSubscription } from 'obs-websocket-js'
-import type { CaptureSession, ConnectionState, RecordingDateFormat, RecordingLocation, VmixState } from '../shared/types.js'
+import type { CaptureSession, ConnectionState, RecordingDateFormat, VmixState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
 import { buildDescriptImportBody } from './descript-import.js'
 import { SettingsStore } from './settings.js'
@@ -62,22 +62,28 @@ export class DescriptService {
   }
 
   async reconcile(): Promise<void> {
+    const uploadsEnabled = this.settings.get().uploadsEnabled
     const token = await this.settings.getDescriptToken()
-    if (!token) throw new Error('Connect Descript before reconciling recordings.')
-    await this.pollProcessing(token)
+    if (!token && uploadsEnabled) throw new Error('Connect Descript before reconciling recordings.')
     const pending = this.ledger.getPendingSessions()
-    const remote = await this.listProjects(token)
-    for (const session of pending.filter((item) => item.status === 'ready')) {
-      const match = remote.find((project) => project.folder_path === session.descriptFolderPath && project.name === session.descriptProjectName)
-      if (!match) continue
-      session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => this.ledger.updateFile(file.id, { uploadStatus: 'uploaded', errorMessage: null }))
-      this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: match.id, errorMessage: null })
+    if (token) {
+      await this.pollProcessing(token)
+      const remote = await this.listProjects(token)
+      for (const session of pending.filter((item) => item.status === 'ready')) {
+        const match = remote.find((project) => project.folder_path === session.descriptFolderPath && project.name === session.descriptProjectName)
+        if (!match) continue
+        session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => this.ledger.updateFile(file.id, { uploadStatus: 'uploaded', errorMessage: null }))
+        this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: match.id, errorMessage: null })
+      }
     }
     this.ledger.addActivity('info', `Reconciliation checked ${pending.length} queued session${pending.length === 1 ? '' : 's'}.`)
-    for (const session of this.ledger.getPendingSessions().filter((item) => item.status === 'ready')) await this.upload(session)
+    if (uploadsEnabled) {
+      for (const session of this.ledger.getPendingSessions().filter((item) => item.status === 'ready')) await this.upload(session)
+    }
   }
 
   async upload(session: CaptureSession): Promise<void> {
+    if (!this.settings.get().uploadsEnabled || session.uploadExcluded) return
     if (this.activeUploads.has(session.id)) return
     const controller = new AbortController()
     let finish!: () => void
@@ -87,13 +93,14 @@ export class DescriptService {
       const token = await this.settings.getDescriptToken()
       if (!token) throw new Error('Connect Descript before uploading sessions.')
       controller.signal.throwIfAborted()
-      if (this.ledger.getSession(session.id)?.status === 'canceled') return
-      const files = session.files.filter((file) => file.uploadStatus !== 'excluded')
+      const current = this.ledger.getSession(session.id)
+      if (!this.settings.get().uploadsEnabled || !current || current.uploadExcluded || current.status !== 'ready') return
+      const files = current.files.filter((file) => file.uploadStatus !== 'excluded')
       const primary = files.filter((file) => file.sourceRole === 'primary')
       if (!primary.length) throw new Error('This session has no primary recording.')
       if (files.some((file) => file.stabilityStatus !== 'stable')) throw new Error('Every included file must be stable before upload.')
       this.ledger.updateSession(session.id, { status: 'uploading', errorMessage: null })
-      const body = buildDescriptImportBody(session)
+      const body = buildDescriptImportBody(current)
       const response = await fetch('https://descriptapi.com/v1/jobs/import/project_media', {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
       })
@@ -115,7 +122,7 @@ export class DescriptService {
       }
       controller.signal.throwIfAborted()
       this.ledger.updateSession(session.id, { status: 'processing' })
-      this.ledger.addActivity('info', `Sent ${files.length} file${files.length === 1 ? '' : 's'} from ${session.descriptProjectName} to Descript for processing.`)
+      this.ledger.addActivity('info', `Sent ${files.length} file${files.length === 1 ? '' : 's'} from ${current.descriptProjectName} to Descript for processing.`)
     } catch (error) {
       if (controller.signal.aborted || this.ledger.getSession(session.id)?.status === 'canceled') return
       const uploading = this.ledger.getSession(session.id)?.files.find((file) => file.uploadStatus === 'uploading')
@@ -236,21 +243,15 @@ export class RecordingWatcher {
       })
     }
     if (settings.recorderType === 'vmix') {
-      const locations = settings.vmixRecordingLocations.filter((location) => location.enabled)
-      if (!locations.length) throw new Error('Add at least one enabled vMix recording location.')
-      const uniqueDirectories = [...new Set(locations.map((location) => location.path))]
-      for (const directory of uniqueDirectories) {
-        await fs.access(directory)
-        directories.push(directory)
-      }
+      if (!settings.reconciliationDirectory) throw new Error('Choose the reconciliation folder where vMix writes MultiCorder XML manifests.')
+      await fs.access(settings.reconciliationDirectory)
+      directories.push(settings.reconciliationDirectory)
       await this.refreshVmixManifestBaseline()
-      for (const directory of uniqueDirectories) {
-        this.watchDirectory(directory, (filename) => {
-          if (filename && extname(filename.toString()).toLowerCase() === '.xml') {
-            void this.ingestVmixManifest(join(directory, filename.toString()))
-          }
-        })
-      }
+      this.watchDirectory(settings.reconciliationDirectory, (filename) => {
+        if (filename && extname(filename.toString()).toLowerCase() === '.xml') {
+          void this.ingestVmixManifest(join(settings.reconciliationDirectory!, filename.toString()))
+        }
+      })
     }
     if (!directories.length) throw new Error('Choose OBS or vMix before starting monitoring.')
     this.scanTimer = setInterval(() => void this.scan(), 10_000)
@@ -285,6 +286,10 @@ export class RecordingWatcher {
   }
   async scanReconciliationDirectory(): Promise<void> {
     const settings = this.settings.get()
+    if (settings.recorderType === 'vmix') {
+      await this.scanVmixManifests()
+      return
+    }
     const dir = settings.reconciliationDirectory ?? settings.recordingsDirectory
     const today = new Date()
     if (dir) await this.scanDirectory(dir, (stats) => isSameRecordingDay(fileRecordingDate(stats), today, settings.recordingTimezone))
@@ -338,12 +343,10 @@ export class RecordingWatcher {
       } catch { /* A file may disappear while the directory is being scanned. */ }
     }
   }
-  private vmixLocations(): RecordingLocation[] {
-    return this.settings.get().vmixRecordingLocations.filter((location) => location.enabled)
-  }
   private async refreshVmixManifestBaseline(): Promise<void> {
     const baseline = new Set<string>()
-    for (const directory of new Set(this.vmixLocations().map((location) => location.path))) {
+    const directory = this.settings.get().reconciliationDirectory
+    if (directory) {
       for (const name of await fs.readdir(directory)) {
         if (extname(name).toLowerCase() === '.xml') baseline.add(canonicalPath(join(directory, name)))
       }
@@ -351,7 +354,8 @@ export class RecordingWatcher {
     this.vmixManifestBaseline = baseline
   }
   private async scanVmixManifests(): Promise<void> {
-    for (const directory of new Set(this.vmixLocations().map((location) => location.path))) {
+    const directory = this.settings.get().reconciliationDirectory
+    if (directory) {
       for (const name of await fs.readdir(directory)) {
         if (extname(name).toLowerCase() === '.xml') await this.ingestVmixManifest(join(directory, name))
       }
@@ -378,42 +382,33 @@ export class RecordingWatcher {
   private async ingestVmixManifestWhenReady(path: string): Promise<void> {
     const xml = await fs.readFile(path, 'utf8')
     const filenames = parseVmixManifestMediaNames(xml)
-    const locations = [...this.vmixLocations()].sort((left, right) => Number(Boolean(right.filenameFilter)) - Number(Boolean(left.filenameFilter)))
-    const directoryEntries = new Map<string, Map<string, string>>()
-    for (const directory of new Set(locations.map((location) => location.path))) {
-      const entries = new Map<string, string>()
-      for (const name of await fs.readdir(directory)) entries.set(process.platform === 'win32' ? name.toLowerCase() : name, name)
-      directoryEntries.set(directory, entries)
-    }
-    const resolvedPaths: Array<{ path: string; location: RecordingLocation }> = []
+    const directory = dirname(path)
+    const directoryEntries = new Map<string, string>()
+    for (const name of await fs.readdir(directory)) directoryEntries.set(process.platform === 'win32' ? name.toLowerCase() : name, name)
+    const resolvedPaths: string[] = []
     for (const filename of filenames) {
-      let match: { path: string; location: RecordingLocation } | undefined
-      for (const location of locations) {
-        const actual = directoryEntries.get(location.path)?.get(process.platform === 'win32' ? filename.toLowerCase() : filename)
-        if (!actual) continue
-        const candidate = join(location.path, actual)
-        if (eligibleForLocation(candidate, location)) { match = { path: candidate, location }; break }
-      }
-      if (!match) throw new Error(`Referenced media file was not found in a configured location: ${filename}`)
-      if (this.ledger.getByPath(match.path)) throw new Error(`Referenced media file already belongs to another session: ${filename}`)
-      resolvedPaths.push(match)
+      const actual = directoryEntries.get(process.platform === 'win32' ? filename.toLowerCase() : filename)
+      if (!actual) throw new Error(`Referenced media file was not found beside the XML manifest: ${filename}`)
+      const mediaPath = join(directory, actual)
+      if (!SUPPORTED_EXTENSIONS.has(extname(mediaPath).toLowerCase())) throw new Error(`Referenced media file is not supported: ${filename}`)
+      if (this.ledger.getByPath(mediaPath)) throw new Error(`Referenced media file already belongs to another session: ${filename}`)
+      resolvedPaths.push(mediaPath)
     }
-    const resolvedFiles = await Promise.all(resolvedPaths.map(async (file) => ({ ...file, stats: await this.stableFile(file.path) })))
+    const resolvedFiles = await Promise.all(resolvedPaths.map(async (filePath) => ({ path: filePath, stats: await this.stableFile(filePath) })))
     const manifestStats = await fs.stat(path)
     const settings = this.settings.get()
     const startedAt = new Date(Math.min(...resolvedFiles.map((file) => file.stats.birthtimeMs || file.stats.mtimeMs)))
     const folder = [settings.descriptDestinationRoot, recordingDate(startedAt, settings.recordingTimezone, settings.recordingDateFormat)].filter(Boolean).join('/')
     const usedKeys = new Set<string>()
-    const segmentIndexes = new Map<string, number>()
-    const files = resolvedFiles.map((file) => {
+    const primaryIndex = Math.max(0, resolvedFiles.findIndex((file) => /\bOutput\s+\d+\b/i.test(basename(file.path))))
+    const files = resolvedFiles.map((file, index) => {
       const filename = basename(file.path)
-      const mediaKey = uniqueMediaKeyFromSet(usedKeys, file.location.label, filename)
-      const segmentIndex = segmentIndexes.get(file.location.id) ?? 0
-      segmentIndexes.set(file.location.id, segmentIndex + 1)
+      const sourceLabel = sourceLabelFromVmixFilename(filename)
+      const mediaKey = uniqueMediaKeyFromSet(usedKeys, sourceLabel, filename)
       return {
-        locationId: file.location.id, sourceLabel: file.location.label, sourceRole: file.location.role,
+        locationId: `vmix-track-${index + 1}`, sourceLabel, sourceRole: index === primaryIndex ? 'primary' as const : 'iso' as const,
         localPath: file.path, originalFilename: filename, descriptMediaKey: mediaKey, contentType: contentType(file.path),
-        fileSize: file.stats.size, modifiedAt: file.stats.mtime.toISOString(), segmentIndex,
+        fileSize: file.stats.size, modifiedAt: file.stats.mtime.toISOString(), segmentIndex: 0,
         stabilityStatus: 'stable' as const, uploadStatus: 'pending' as const
       }
     })
@@ -425,7 +420,7 @@ export class RecordingWatcher {
       descriptProjectId: null, descriptJobId: null,
       configurationSnapshot: JSON.stringify({
         recorderType: 'vmix', confirmation: 'multicorder_manifest', manifestPath: path,
-        host: settings.vmixHost, port: settings.vmixPort, useApi: settings.vmixUseApi, locations
+        host: settings.vmixHost, port: settings.vmixPort, useApi: settings.vmixUseApi, directory
       })
     }, files)
     const canonical = canonicalPath(path)
@@ -497,13 +492,9 @@ function canonicalPath(path: string): string {
   const value = resolve(path)
   return process.platform === 'win32' ? value.toLowerCase() : value
 }
-function eligibleForLocation(path: string, location: RecordingLocation): boolean {
-  if (!SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())) return false
-  const name = basename(path)
-  if (/(\.part|\.partial|\.tmp|\.temp)$/i.test(name)) return false
-  if (!location.filenameFilter) return true
-  const escaped = location.filenameFilter.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
-  return new RegExp(`^${escaped}$`, process.platform === 'win32' ? 'i' : '').test(name)
+function sourceLabelFromVmixFilename(filename: string): string {
+  const stem = filename.slice(0, filename.length - extname(filename).length)
+  return stem.replace(/^MultiCorder\d*\s*-\s*/i, '').replace(/\s+-\s+\d{1,2}\s+\w+\s+\d{4}\s+-\s+.*$/i, '').trim() || stem
 }
 function uniqueMediaKeyFromSet(used: Set<string>, sourceLabel: string, filename: string): string {
   const extension = extname(filename)

@@ -8,6 +8,7 @@ const DESCRIPT_ACCOUNT = 'descript-api-token'
 const OBS_ACCOUNT = 'obs-websocket-password'
 
 const defaults = (): AppSettings => ({
+  uploadsEnabled: true,
   descriptDestinationRoot: '',
   recordingTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   recordingDateFormat: 'yy-MM-dd',
@@ -18,8 +19,7 @@ const defaults = (): AppSettings => ({
   recorderType: 'obs',
   vmixHost: '127.0.0.1',
   vmixPort: 8088,
-  vmixUseApi: true,
-  vmixRecordingLocations: []
+  vmixUseApi: true
 })
 
 export function normalizeDestination(input: string): string {
@@ -53,12 +53,28 @@ export class SettingsStore {
 
   async load(): Promise<AppSettings> {
     try {
-      const saved = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<AppSettings> & { recordingDateFormat?: string; monitorObs?: boolean; monitorVmix?: boolean }
-      const { monitorObs: _monitorObs, monitorVmix: _monitorVmix, ...current } = saved
+      const saved = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<AppSettings> & {
+        recordingDateFormat?: string
+        monitorObs?: boolean
+        monitorVmix?: boolean
+        vmixDirectory?: string | null
+        vmixRecordingLocations?: Array<{ path?: string; enabled?: boolean }>
+      }
+      const {
+        monitorObs: _monitorObs,
+        monitorVmix: _monitorVmix,
+        vmixDirectory: legacyVmixDirectory,
+        vmixRecordingLocations: legacyLocations,
+        ...current
+      } = saved
+      const recorderType = normalizeRecorderType(saved)
       this.settings = {
         ...defaults(),
         ...current,
-        recorderType: normalizeRecorderType(saved),
+        reconciliationDirectory: saved.reconciliationDirectory
+          ?? (recorderType === 'vmix' ? legacyVmixDirectory ?? legacyLocations?.find((location) => location.enabled !== false)?.path : null)
+          ?? null,
+        recorderType,
         recordingDateFormat: normalizeDateFormat(saved.recordingDateFormat ?? defaults().recordingDateFormat)
       }
     } catch {
@@ -71,6 +87,7 @@ export class SettingsStore {
 
   async save(input: SettingsInput): Promise<AppSettings> {
     const next: AppSettings = {
+      uploadsEnabled: Boolean(input.uploadsEnabled),
       descriptDestinationRoot: normalizeDestination(input.descriptDestinationRoot),
       recordingTimezone: input.recordingTimezone || defaults().recordingTimezone,
       recordingDateFormat: normalizeDateFormat(input.recordingDateFormat),
@@ -81,11 +98,7 @@ export class SettingsStore {
       recorderType: normalizeRecorderType(input),
       vmixHost: input.vmixHost.trim() || '127.0.0.1',
       vmixPort: Number(input.vmixPort) || 8088,
-      vmixUseApi: Boolean(input.vmixUseApi),
-      vmixRecordingLocations: input.vmixRecordingLocations.map((location) => ({
-        ...location, path: location.path.trim(), label: location.label.trim(),
-        filenameFilter: location.filenameFilter?.trim() || null
-      }))
+      vmixUseApi: Boolean(input.vmixUseApi)
     }
     this.settings = next
     await writeFile(this.filePath, JSON.stringify(next, null, 2), 'utf8')

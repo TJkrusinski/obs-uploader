@@ -15,16 +15,8 @@ export type SessionFileRole = 'primary' | 'iso'
 export type SessionFileUploadStatus = 'pending' | 'uploading' | 'uploaded' | 'failed' | 'excluded' | 'missing'
 export type SessionFileStabilityStatus = 'pending' | 'probing' | 'stable' | 'unsupported' | 'missing'
 
-export interface RecordingLocation {
-  id: string
-  path: string
-  label: string
-  role: SessionFileRole
-  enabled: boolean
-  filenameFilter: string | null
-}
-
 export interface AppSettings {
+  uploadsEnabled: boolean
   descriptDestinationRoot: string
   recordingTimezone: string
   recordingDateFormat: RecordingDateFormat
@@ -36,7 +28,6 @@ export interface AppSettings {
   vmixHost: string
   vmixPort: number
   vmixUseApi: boolean
-  vmixRecordingLocations: RecordingLocation[]
 }
 
 export interface SessionFile {
@@ -73,6 +64,7 @@ export interface CaptureSession {
   configurationSnapshot: string
   errorMessage: string | null
   hidden: boolean
+  uploadExcluded: boolean
   createdAt: string
   updatedAt: string
   files: SessionFile[]
@@ -140,6 +132,7 @@ export interface DesktopApi {
   cancelSession: (id: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   setSessionHidden: (id: string, hidden: boolean) => Promise<void>
+  setSessionUploadExcluded: (id: string, excluded: boolean) => Promise<void>
   finalizeSession: (id: string) => Promise<void>
   recheckSession: (id: string) => Promise<void>
   setSessionFileExcluded: (sessionId: string, fileId: string, excluded: boolean) => Promise<void>

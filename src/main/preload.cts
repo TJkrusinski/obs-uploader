@@ -18,6 +18,7 @@ const desktopApi: DesktopApi = {
   cancelSession: (id) => ipcRenderer.invoke('sessions:cancel', id),
   deleteSession: (id) => ipcRenderer.invoke('sessions:delete', id),
   setSessionHidden: (id, hidden) => ipcRenderer.invoke('sessions:setHidden', id, hidden),
+  setSessionUploadExcluded: (id, excluded) => ipcRenderer.invoke('sessions:setUploadExcluded', id, excluded),
   finalizeSession: (id) => ipcRenderer.invoke('sessions:finalize', id),
   recheckSession: (id) => ipcRenderer.invoke('sessions:recheck', id),
   setSessionFileExcluded: (sessionId, fileId, excluded) => ipcRenderer.invoke('sessions:setFileExcluded', sessionId, fileId, excluded),

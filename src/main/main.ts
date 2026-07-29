@@ -49,7 +49,7 @@ async function initializeRecordersAndWatcher(): Promise<void> {
   const current = settings.get()
   if (current.recorderType === 'obs') await connectObsAndSync({ host: current.obsHost, port: current.obsPort })
   if (current.recorderType === 'vmix' && current.vmixUseApi) vmix.start({ host: current.vmixHost, port: current.vmixPort })
-  if ((current.recorderType === 'obs' && current.recordingsDirectory) || (current.recorderType === 'vmix' && current.vmixRecordingLocations.some((location) => location.enabled))) {
+  if ((current.recorderType === 'obs' && current.recordingsDirectory) || (current.recorderType === 'vmix' && current.reconciliationDirectory)) {
     if (!watcher.isWatching()) await watcher.start()
   }
 }
@@ -135,6 +135,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('settings:save', async (_event, input: SettingsInput) => {
     await validateRecorderSettings(input)
+    const uploadsWereEnabled = settings.get().uploadsEnabled
     watcher.stop(); vmix.stop()
     const result = await settings.save(input)
     hasDescriptToken = await settings.hasDescriptToken()
@@ -142,6 +143,11 @@ function registerIpc(): void {
       ledger.addActivity('error', error instanceof Error ? error.message : String(error)); broadcast()
     })
     broadcast()
+    if (!uploadsWereEnabled && result.uploadsEnabled) {
+      void descript.reconcile().then(broadcast).catch((error) => {
+        ledger.addActivity('error', error instanceof Error ? error.message : String(error)); broadcast()
+      })
+    }
     return result
   })
   ipcMain.handle('descript:test', async (_event, token?: string) => {
@@ -207,6 +213,19 @@ function registerIpc(): void {
     if (!ledger.getSession(id)) throw new Error('Session not found.')
     ledger.setHidden(id, Boolean(hidden)); broadcast()
   })
+  ipcMain.handle('sessions:setUploadExcluded', async (_event, id: string, excluded: boolean) => {
+    const session = ledger.getSession(id); if (!session) throw new Error('Session not found.')
+    if (['uploading', 'processing', 'completed'].includes(session.status)) throw new Error('Upload preference cannot change after upload begins.')
+    ledger.setUploadExcluded(id, Boolean(excluded))
+    ledger.addActivity('info', `${excluded ? 'Marked' : 'Unmarked'} ${session.descriptProjectName} ${excluded ? 'to stay local' : 'for upload'}.`)
+    broadcast()
+    if (!excluded && settings.get().uploadsEnabled) {
+      const updated = ledger.getSession(id)
+      if (updated?.status === 'ready') {
+        try { await descript.upload(updated) } finally { broadcast() }
+      }
+    }
+  })
   ipcMain.handle('sessions:finalize', async (_event, id: string) => {
     if (ledger.getSession(id)?.descriptJobId) throw new Error('This session already has a Descript import job and cannot be finalized into a replacement upload.')
     if (vmix.getRecorderState().recording || vmix.getRecorderState().multiCorder) throw new Error('vMix is still recording. Stop both the recorder and MultiCorder first.')
@@ -244,23 +263,9 @@ app.on('before-quit', () => { vmix?.stop(); watcher?.stop(); ledger?.close() })
 async function validateRecorderSettings(input: SettingsInput): Promise<void> {
   if (input.recorderType !== 'obs' && input.recorderType !== 'vmix') throw new Error('Choose OBS or vMix.')
   if (input.recorderType === 'vmix') {
-    const locations = input.vmixRecordingLocations.filter((location) => location.enabled)
-    if (!locations.length) throw new Error('Add at least one enabled vMix recording location.')
-    if (locations.filter((location) => location.role === 'primary').length !== 1) throw new Error('Exactly one enabled vMix location must be primary.')
-    const labels = new Set<string>()
-    const paths = new Set<string>()
-    for (const location of locations) {
-      const label = location.label.trim().toLowerCase()
-      if (!label) throw new Error('Every vMix recording location needs a label.')
-      if (labels.has(label)) throw new Error(`The vMix location label "${location.label}" is duplicated.`)
-      labels.add(label)
-      const path = process.platform === 'win32' ? location.path.trim().toLowerCase() : location.path.trim()
-      const pathKey = `${path}\0${location.filenameFilter?.trim().toLowerCase() ?? ''}`
-      if (paths.has(pathKey)) throw new Error(`The vMix recording location "${location.path}" is duplicated.`)
-      paths.add(pathKey)
-      const stats = await fs.stat(location.path)
-      if (!stats.isDirectory()) throw new Error(`${location.path} is not a directory.`)
-      await fs.readdir(location.path)
-    }
+    if (!input.reconciliationDirectory) throw new Error('Choose the reconciliation folder where vMix writes MultiCorder XML manifests.')
+    const stats = await fs.stat(input.reconciliationDirectory)
+    if (!stats.isDirectory()) throw new Error(`${input.reconciliationDirectory} is not a directory.`)
+    await fs.readdir(input.reconciliationDirectory)
   }
 }
