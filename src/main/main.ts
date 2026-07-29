@@ -110,7 +110,10 @@ app.whenReady().then(async () => {
   descript = new DescriptService(settings, ledger)
   watcher = new RecordingWatcher(settings, ledger, () => broadcast(), async (session) => {
     broadcast()
-    try { await descript.upload(session) } finally { broadcast() }
+    try {
+      if (session.recorderType === 'vmix') await descript.reconcile()
+      else await descript.upload(session)
+    } finally { broadcast() }
   })
   obs = new ObsService(settings, () => broadcast(), (path) => watcher.recordingStopped(path), (available) => watcher.setObsStopEventsAvailable(available))
   vmix = new VmixService(() => broadcast(), (recording, multiCorder) => watcher.vmixStateChanged(recording, multiCorder), () => watcher.vmixConnectionLost())

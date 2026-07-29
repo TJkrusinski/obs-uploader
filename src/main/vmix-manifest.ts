@@ -1,3 +1,5 @@
+import { basename, extname } from 'node:path'
+
 function decodeXmlText(value: string): string {
   return value
     .replace(/&lt;/g, '<')
@@ -31,4 +33,10 @@ export function parseVmixManifestMediaNames(xml: string): string[] {
   }
   if (!names.length) throw new Error('The vMix MultiCorder XML manifest does not reference any media files.')
   return names
+}
+
+export function vmixProjectNameFromManifest(path: string): string {
+  const filename = basename(path)
+  const stem = filename.slice(0, filename.length - extname(filename).length).trim()
+  return stem || filename
 }

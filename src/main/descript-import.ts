@@ -10,9 +10,10 @@ type MultitrackSequence = {
 }
 
 export interface DescriptImportBody {
-  project_name: string
-  folder_name: string
-  team_access: 'edit'
+  project_id?: string
+  project_name?: string
+  folder_name?: string
+  team_access?: 'edit'
   add_media: Record<string, DirectUploadMedia | MultitrackSequence>
   add_compositions: Array<{ name: string; clips: Array<{ media: string }> }>
 }
@@ -25,14 +26,24 @@ function availableReferenceId(files: SessionFile[], requested: string): string {
   return candidate
 }
 
-export function buildDescriptImportBody(session: CaptureSession): DescriptImportBody {
+export function vmixSequenceKey(files: SessionFile[]): string {
+  return availableReferenceId(files, 'MultiCorder Sequence')
+}
+
+export function buildDescriptImportBody(
+  session: CaptureSession,
+  options: { projectId?: string; directUploadFileIds?: Set<string> } = {}
+): DescriptImportBody {
   const files = session.files.filter((file) => file.uploadStatus !== 'excluded')
+  const directUploadFiles = options.directUploadFileIds
+    ? files.filter((file) => options.directUploadFileIds!.has(file.id))
+    : files
   const addMedia: DescriptImportBody['add_media'] = Object.fromEntries(
-    files.map((file) => [file.descriptMediaKey, { content_type: file.contentType, file_size: file.fileSize }])
+    directUploadFiles.map((file) => [file.descriptMediaKey, { content_type: file.contentType, file_size: file.fileSize }])
   )
   let compositionClips: Array<{ media: string }>
   if (session.recorderType === 'vmix') {
-    const sequenceKey = availableReferenceId(files, 'MultiCorder Sequence')
+    const sequenceKey = vmixSequenceKey(files)
     addMedia[sequenceKey] = {
       tracks: files.map((file) => ({ media: file.descriptMediaKey, offset: 0 }))
     }
@@ -43,9 +54,13 @@ export function buildDescriptImportBody(session: CaptureSession): DescriptImport
       .map((file) => ({ media: file.descriptMediaKey }))
   }
   return {
-    project_name: session.descriptProjectName,
-    folder_name: session.descriptFolderPath,
-    team_access: 'edit',
+    ...(options.projectId
+      ? { project_id: options.projectId }
+      : {
+          project_name: session.descriptProjectName,
+          folder_name: session.descriptFolderPath,
+          team_access: 'edit' as const
+        }),
     add_media: addMedia,
     add_compositions: [{ name: 'Recording', clips: compositionClips }]
   }

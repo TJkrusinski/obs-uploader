@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
-import { parseVmixManifestMediaNames } from '../dist-electron/main/vmix-manifest.js'
+import { parseVmixManifestMediaNames, vmixProjectNameFromManifest } from '../dist-electron/main/vmix-manifest.js'
 
 test('extracts the unique media files from the example MultiCorder manifest', async () => {
   const xml = await readFile(new URL('../multicorder_example/MultiCorder - Timeline - 28 July 2026 - 11-53-49 AM.xml', import.meta.url), 'utf8')
@@ -23,4 +23,11 @@ test('rejects a manifest before its closing tag has been written', () => {
 test('decodes XML entities and URL escapes in media paths', () => {
   const xml = '<xmeml><pathurl>file://localhost/C:/A%20%26%20B.mp4</pathurl><pathurl>file://localhost/C:/A%20%26%20B.mp4</pathurl></xmeml>'
   assert.deepEqual(parseVmixManifestMediaNames(xml), ['A & B.mp4'])
+})
+
+test('uses the XML filename as the stable project key', () => {
+  assert.equal(
+    vmixProjectNameFromManifest('/recordings/MultiCorder - Timeline - 28 July 2026.xml'),
+    'MultiCorder - Timeline - 28 July 2026'
+  )
 })

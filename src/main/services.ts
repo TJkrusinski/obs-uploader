@@ -7,10 +7,14 @@ import type { CaptureSession, ConnectionState, RecordingDateFormat, VmixState } 
 import { LedgerDatabase } from './database.js'
 import { buildDescriptImportBody } from './descript-import.js'
 import { SettingsStore } from './settings.js'
-import { parseVmixManifestMediaNames } from './vmix-manifest.js'
+import { parseVmixManifestMediaNames, vmixProjectNameFromManifest } from './vmix-manifest.js'
+import { inspectVmixProjectContents, type VmixProjectContents } from './vmix-reconciliation.js'
 
 const SUPPORTED_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.mkv', '.webm', '.wav', '.mp3', '.m4a', '.aiff', '.flac', '.opus', '.aac'])
 const FILE_STABILITY_DELAY_MS = 2_000
+
+type RemoteProject = { id: string; name: string; folder_path: string }
+type RemoteProjectDetails = RemoteProject & VmixProjectContents
 
 function recordingDate(date: Date, timeZone: string, format: RecordingDateFormat): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(date)
@@ -72,8 +76,12 @@ export class DescriptService {
       for (const session of pending.filter((item) => item.status === 'ready')) {
         const match = remote.find((project) => project.folder_path === session.descriptFolderPath && project.name === session.descriptProjectName)
         if (!match) continue
-        session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => this.ledger.updateFile(file.id, { uploadStatus: 'uploaded', errorMessage: null }))
-        this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: match.id, errorMessage: null })
+        if (session.recorderType === 'vmix') {
+          await this.reconcileVmixProject(token, session, match)
+        } else {
+          session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => this.ledger.updateFile(file.id, { uploadStatus: 'uploaded', errorMessage: null }))
+          this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: match.id, errorMessage: null })
+        }
       }
     }
     this.ledger.addActivity('info', `Reconciliation checked ${pending.length} queued session${pending.length === 1 ? '' : 's'}.`)
@@ -96,11 +104,15 @@ export class DescriptService {
       const current = this.ledger.getSession(session.id)
       if (!this.settings.get().uploadsEnabled || !current || current.uploadExcluded || current.status !== 'ready') return
       const files = current.files.filter((file) => file.uploadStatus !== 'excluded')
+      const filesToUpload = files.filter((file) => file.uploadStatus !== 'uploaded')
       const primary = files.filter((file) => file.sourceRole === 'primary')
       if (!primary.length) throw new Error('This session has no primary recording.')
       if (files.some((file) => file.stabilityStatus !== 'stable')) throw new Error('Every included file must be stable before upload.')
       this.ledger.updateSession(session.id, { status: 'uploading', errorMessage: null })
-      const body = buildDescriptImportBody(current)
+      const body = buildDescriptImportBody(current, {
+        projectId: current.recorderType === 'vmix' ? current.descriptProjectId ?? undefined : undefined,
+        directUploadFileIds: new Set(filesToUpload.map((file) => file.id))
+      })
       const response = await fetch('https://descriptapi.com/v1/jobs/import/project_media', {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
       })
@@ -108,7 +120,7 @@ export class DescriptService {
       const result = await response.json() as { job_id: string; project_id: string; upload_urls?: Record<string, { upload_url: string }> }
       controller.signal.throwIfAborted()
       this.ledger.updateSession(session.id, { descriptJobId: result.job_id, descriptProjectId: result.project_id })
-      for (const file of files) {
+      for (const file of filesToUpload) {
         controller.signal.throwIfAborted()
         const source = await fs.stat(file.localPath)
         if (!source.isFile() || source.size !== file.fileSize) throw new Error(`${file.sourceLabel} — ${file.originalFilename} changed before upload.`)
@@ -122,7 +134,7 @@ export class DescriptService {
       }
       controller.signal.throwIfAborted()
       this.ledger.updateSession(session.id, { status: 'processing' })
-      this.ledger.addActivity('info', `Sent ${files.length} file${files.length === 1 ? '' : 's'} from ${current.descriptProjectName} to Descript for processing.`)
+      this.ledger.addActivity('info', `Sent ${filesToUpload.length} file${filesToUpload.length === 1 ? '' : 's'} from ${current.descriptProjectName} to Descript for processing.`)
     } catch (error) {
       if (controller.signal.aborted || this.ledger.getSession(session.id)?.status === 'canceled') return
       const uploading = this.ledger.getSession(session.id)?.files.find((file) => file.uploadStatus === 'uploading')
@@ -169,8 +181,8 @@ export class DescriptService {
     await Promise.all(operations)
   }
 
-  private async listProjects(token: string): Promise<Array<{ id: string; name: string; folder_path: string }>> {
-    const results: Array<{ id: string; name: string; folder_path: string }> = []
+  private async listProjects(token: string): Promise<RemoteProject[]> {
+    const results: RemoteProject[] = []
     let cursor: string | undefined
     do {
       const url = new URL('https://descriptapi.com/v1/projects')
@@ -178,10 +190,22 @@ export class DescriptService {
       if (cursor) url.searchParams.set('cursor', cursor)
       const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       if (!response.ok) throw new Error(`Unable to list Descript projects (${response.status}).`)
-      const page = await response.json() as { data: Array<{ id: string; name: string; folder_path: string }>; pagination?: { next_cursor?: string } }
+      const page = await response.json() as { data: RemoteProject[]; pagination?: { next_cursor?: string } }
       results.push(...page.data); cursor = page.pagination?.next_cursor
     } while (cursor)
     return results
+  }
+
+  private async reconcileVmixProject(token: string, session: CaptureSession, project: RemoteProject): Promise<void> {
+    const response = await fetch(`https://descriptapi.com/v1/projects/${project.id}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!response.ok) throw new Error(`Unable to inspect Descript project ${project.name} (${response.status}).`)
+    const details = await response.json() as RemoteProjectDetails
+    const inspection = inspectVmixProjectContents(session.files, details)
+    for (const fileId of inspection.uploadedFileIds) this.ledger.updateFile(fileId, { uploadStatus: 'uploaded', errorMessage: null })
+    this.ledger.updateSession(session.id, { descriptProjectId: project.id, errorMessage: null })
+    if (inspection.complete) {
+      this.ledger.updateSession(session.id, { status: 'completed', descriptProjectId: project.id, errorMessage: null })
+    }
   }
 
   private async pollProcessing(token: string): Promise<void> {
@@ -222,7 +246,6 @@ export class RecordingWatcher {
   private readonly vmixManifestErrors = new Map<string, string>()
   private active = false
   private obsStopEventsAvailable = false
-  private vmixManifestBaseline = new Set<string>()
   constructor(
     private readonly settings: SettingsStore,
     private readonly ledger: LedgerDatabase,
@@ -246,7 +269,6 @@ export class RecordingWatcher {
       if (!settings.reconciliationDirectory) throw new Error('Choose the reconciliation folder where vMix writes MultiCorder XML manifests.')
       await fs.access(settings.reconciliationDirectory)
       directories.push(settings.reconciliationDirectory)
-      await this.refreshVmixManifestBaseline()
       this.watchDirectory(settings.reconciliationDirectory, (filename) => {
         if (filename && extname(filename.toString()).toLowerCase() === '.xml') {
           void this.ingestVmixManifest(join(settings.reconciliationDirectory!, filename.toString()))
@@ -343,16 +365,6 @@ export class RecordingWatcher {
       } catch { /* A file may disappear while the directory is being scanned. */ }
     }
   }
-  private async refreshVmixManifestBaseline(): Promise<void> {
-    const baseline = new Set<string>()
-    const directory = this.settings.get().reconciliationDirectory
-    if (directory) {
-      for (const name of await fs.readdir(directory)) {
-        if (extname(name).toLowerCase() === '.xml') baseline.add(canonicalPath(join(directory, name)))
-      }
-    }
-    this.vmixManifestBaseline = baseline
-  }
   private async scanVmixManifests(): Promise<void> {
     const directory = this.settings.get().reconciliationDirectory
     if (directory) {
@@ -363,7 +375,7 @@ export class RecordingWatcher {
   }
   private async ingestVmixManifest(path: string): Promise<void> {
     const canonical = canonicalPath(path)
-    if (this.vmixManifestBaseline.has(canonical)) return
+    if (this.ledger.hasVmixManifest(path, canonical)) return
     const pending = this.pendingVmixManifests.get(canonical)
     if (pending) return pending
     const operation = this.ingestVmixManifestWhenReady(path).catch((error) => {
@@ -380,6 +392,7 @@ export class RecordingWatcher {
     return operation
   }
   private async ingestVmixManifestWhenReady(path: string): Promise<void> {
+    const canonical = canonicalPath(path)
     const xml = await fs.readFile(path, 'utf8')
     const filenames = parseVmixManifestMediaNames(xml)
     const directory = dirname(path)
@@ -413,18 +426,17 @@ export class RecordingWatcher {
       }
     })
     const hasPrimary = files.some((file) => file.sourceRole === 'primary')
+    const manifestProjectName = vmixProjectNameFromManifest(path)
     const session = this.ledger.createSession({
       recorderType: 'vmix', status: hasPrimary ? 'ready' : 'needs_review', sessionStart: startedAt.toISOString(),
       sessionEnd: manifestStats.mtime.toISOString(), finalizationSource: 'filesystem',
-      descriptFolderPath: folder, descriptProjectName: projectName(startedAt, settings.recordingTimezone),
+      descriptFolderPath: folder, descriptProjectName: manifestProjectName,
       descriptProjectId: null, descriptJobId: null,
       configurationSnapshot: JSON.stringify({
-        recorderType: 'vmix', confirmation: 'multicorder_manifest', manifestPath: path,
+        recorderType: 'vmix', confirmation: 'multicorder_manifest', manifestPath: path, manifestKey: canonical,
         host: settings.vmixHost, port: settings.vmixPort, useApi: settings.vmixUseApi, directory
       })
     }, files)
-    const canonical = canonicalPath(path)
-    this.vmixManifestBaseline.add(canonical)
     this.vmixManifestErrors.delete(canonical)
     if (!hasPrimary) {
       this.ledger.updateSession(session.id, { errorMessage: 'No primary recording was referenced by the MultiCorder manifest.' })

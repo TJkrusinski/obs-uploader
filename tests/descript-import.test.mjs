@@ -53,3 +53,24 @@ test('keeps OBS primary clips in the existing composition format', () => {
   }])
   assert.equal(body.add_media['MultiCorder Sequence'], undefined)
 })
+
+test('targets an existing vMix project and uploads only missing direct media', () => {
+  const files = [
+    { ...file('Camera 1.mp4', 'primary'), id: 'one' },
+    { ...file('Camera 2.mp4'), id: 'two' }
+  ]
+  const body = buildDescriptImportBody(session('vmix', files), {
+    projectId: 'project-id',
+    directUploadFileIds: new Set(['two'])
+  })
+
+  assert.equal(body.project_id, 'project-id')
+  assert.equal(body.project_name, undefined)
+  assert.equal(body.folder_name, undefined)
+  assert.equal(body.add_media['Camera 1.mp4'], undefined)
+  assert.deepEqual(body.add_media['Camera 2.mp4'], { content_type: 'video/mp4', file_size: 100 })
+  assert.deepEqual(body.add_media['MultiCorder Sequence'].tracks, [
+    { media: 'Camera 1.mp4', offset: 0 },
+    { media: 'Camera 2.mp4', offset: 0 }
+  ])
+})

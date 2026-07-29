@@ -144,6 +144,18 @@ export class LedgerDatabase {
     const row = this.db.prepare('SELECT * FROM session_files WHERE local_path = ?').get(localPath)
     return row ? mapSessionFile(row) : undefined
   }
+  hasVmixManifest(manifestPath: string, manifestKey: string): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM capture_sessions
+      WHERE recorder_type = 'vmix'
+        AND json_valid(configuration_snapshot)
+        AND (
+          json_extract(configuration_snapshot, '$.manifestKey') = ?
+          OR json_extract(configuration_snapshot, '$.manifestPath') = ?
+        )
+      LIMIT 1
+    `).get(manifestKey, manifestPath))
+  }
   createSession(session: NewSession, files: NewSessionFile[]): CaptureSession {
     const now = new Date().toISOString()
     const id = randomUUID()
