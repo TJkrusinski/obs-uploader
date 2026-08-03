@@ -45,9 +45,18 @@ export class LedgerDatabase {
         descript_project_name TEXT NOT NULL,
         descript_project_id TEXT,
         descript_job_id TEXT,
+        descript_project_url TEXT,
+        timeline_timebase INTEGER,
+        timeline_ntsc INTEGER,
+        sync_mode TEXT NOT NULL DEFAULT 'unknown',
+        manifest_path TEXT,
+        manifest_hash TEXT,
+        import_attempt_id TEXT,
+        import_payload_hash TEXT,
         configuration_snapshot TEXT NOT NULL,
         error_message TEXT,
         hidden INTEGER NOT NULL DEFAULT 0,
+        upload_excluded INTEGER NOT NULL DEFAULT 0,
         deleted INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -58,13 +67,18 @@ export class LedgerDatabase {
         location_id TEXT NOT NULL,
         source_label TEXT NOT NULL,
         source_role TEXT NOT NULL,
-        local_path TEXT NOT NULL UNIQUE,
+        local_path TEXT NOT NULL,
         original_filename TEXT NOT NULL,
         descript_media_key TEXT NOT NULL,
         content_type TEXT NOT NULL,
         file_size INTEGER NOT NULL,
         modified_at TEXT NOT NULL,
         segment_index INTEGER NOT NULL,
+        manifest_track_index INTEGER,
+        manifest_clip_index INTEGER,
+        manifest_clip_id TEXT,
+        timeline_start_frame INTEGER,
+        timeline_end_frame INTEGER,
         stability_status TEXT NOT NULL,
         upload_status TEXT NOT NULL,
         error_message TEXT,
@@ -82,6 +96,7 @@ export class LedgerDatabase {
       CREATE INDEX IF NOT EXISTS idx_session_files_session ON session_files(session_id);
     `)
     this.ensureLegacyColumns()
+    this.removeLegacySessionFilePathUniqueness()
     this.migrateLegacyRecordings()
     this.markInterruptedUploadsForReview()
   }
@@ -103,19 +118,79 @@ export class LedgerDatabase {
     if (!columns.some((column) => column.name === 'deleted')) this.db.exec('ALTER TABLE recordings ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0')
     const sessionColumns = this.db.pragma('table_info(capture_sessions)') as Array<{ name: string }>
     if (!sessionColumns.some((column) => column.name === 'upload_excluded')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN upload_excluded INTEGER NOT NULL DEFAULT 0')
+    if (!sessionColumns.some((column) => column.name === 'descript_project_url')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN descript_project_url TEXT')
+    if (!sessionColumns.some((column) => column.name === 'timeline_timebase')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN timeline_timebase INTEGER')
+    if (!sessionColumns.some((column) => column.name === 'timeline_ntsc')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN timeline_ntsc INTEGER')
+    if (!sessionColumns.some((column) => column.name === 'sync_mode')) this.db.exec("ALTER TABLE capture_sessions ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'unknown'")
+    if (!sessionColumns.some((column) => column.name === 'manifest_path')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN manifest_path TEXT')
+    if (!sessionColumns.some((column) => column.name === 'manifest_hash')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN manifest_hash TEXT')
+    if (!sessionColumns.some((column) => column.name === 'import_attempt_id')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN import_attempt_id TEXT')
+    if (!sessionColumns.some((column) => column.name === 'import_payload_hash')) this.db.exec('ALTER TABLE capture_sessions ADD COLUMN import_payload_hash TEXT')
+    const fileColumns = this.db.pragma('table_info(session_files)') as Array<{ name: string }>
+    if (!fileColumns.some((column) => column.name === 'manifest_track_index')) this.db.exec('ALTER TABLE session_files ADD COLUMN manifest_track_index INTEGER')
+    if (!fileColumns.some((column) => column.name === 'manifest_clip_index')) this.db.exec('ALTER TABLE session_files ADD COLUMN manifest_clip_index INTEGER')
+    if (!fileColumns.some((column) => column.name === 'manifest_clip_id')) this.db.exec('ALTER TABLE session_files ADD COLUMN manifest_clip_id TEXT')
+    if (!fileColumns.some((column) => column.name === 'timeline_start_frame')) this.db.exec('ALTER TABLE session_files ADD COLUMN timeline_start_frame INTEGER')
+    if (!fileColumns.some((column) => column.name === 'timeline_end_frame')) this.db.exec('ALTER TABLE session_files ADD COLUMN timeline_end_frame INTEGER')
+  }
+  private removeLegacySessionFilePathUniqueness(): void {
+    const table = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'session_files'").get() as { sql?: string } | undefined
+    if (!table?.sql || !/local_path\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(table.sql)) return
+    this.db.pragma('foreign_keys = OFF')
+    try {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE session_files_rebuilt (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            location_id TEXT NOT NULL,
+            source_label TEXT NOT NULL,
+            source_role TEXT NOT NULL,
+            local_path TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            descript_media_key TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            modified_at TEXT NOT NULL,
+            segment_index INTEGER NOT NULL,
+            manifest_track_index INTEGER,
+            manifest_clip_index INTEGER,
+            manifest_clip_id TEXT,
+            timeline_start_frame INTEGER,
+            timeline_end_frame INTEGER,
+            stability_status TEXT NOT NULL,
+            upload_status TEXT NOT NULL,
+            error_message TEXT,
+            discovered_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES capture_sessions(id)
+          );
+          INSERT INTO session_files_rebuilt
+          (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at)
+          SELECT id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at
+          FROM session_files;
+          DROP TABLE session_files;
+          ALTER TABLE session_files_rebuilt RENAME TO session_files;
+          CREATE INDEX idx_session_files_session ON session_files(session_id);
+          CREATE INDEX idx_session_files_path ON session_files(local_path);
+        `)
+      })()
+    } finally {
+      this.db.pragma('foreign_keys = ON')
+    }
   }
   private migrateLegacyRecordings(): void {
     const migrate = this.db.transaction(() => {
       const rows = this.db.prepare('SELECT * FROM recordings').all() as any[]
       const insertSession = this.db.prepare(`
         INSERT OR IGNORE INTO capture_sessions
-        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,upload_excluded,deleted,created_at,updated_at)
-        VALUES (@id,'obs',@status,@recorded_at,@session_end,'obs_event',@descript_folder_path,@descript_project_name,@descript_project_id,@descript_job_id,@snapshot,@error_message,@hidden,0,@deleted,@discovered_at,@updated_at)
+        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,descript_project_url,timeline_timebase,timeline_ntsc,sync_mode,manifest_path,manifest_hash,import_attempt_id,import_payload_hash,configuration_snapshot,error_message,hidden,upload_excluded,deleted,created_at,updated_at)
+        VALUES (@id,'obs',@status,@recorded_at,@session_end,'obs_event',@descript_folder_path,@descript_project_name,@descript_project_id,@descript_job_id,NULL,NULL,NULL,'unknown',NULL,NULL,NULL,NULL,@snapshot,@error_message,@hidden,0,@deleted,@discovered_at,@updated_at)
       `)
       const insertFile = this.db.prepare(`
         INSERT OR IGNORE INTO session_files
-        (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,stability_status,upload_status,error_message,discovered_at,updated_at)
-        VALUES (@file_id,@id,'legacy-primary','Program','primary',@local_path,@original_filename,@original_filename,@content_type,@file_size,@updated_at,0,'stable',@upload_status,@file_error,@discovered_at,@updated_at)
+        (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at)
+        VALUES (@file_id,@id,'legacy-primary','Program','primary',@local_path,@original_filename,@original_filename,@content_type,@file_size,@updated_at,0,NULL,NULL,NULL,NULL,NULL,'stable',@upload_status,@file_error,@discovered_at,@updated_at)
       `)
       for (const row of rows) {
         const status = legacySessionStatus(row.status)
@@ -144,17 +219,23 @@ export class LedgerDatabase {
     const row = this.db.prepare('SELECT * FROM session_files WHERE local_path = ?').get(localPath)
     return row ? mapSessionFile(row) : undefined
   }
-  hasVmixManifest(manifestPath: string, manifestKey: string): boolean {
-    return Boolean(this.db.prepare(`
-      SELECT 1 FROM capture_sessions
+  getVmixSessionByManifest(manifestPath: string, manifestKey: string): CaptureSession | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM capture_sessions
       WHERE recorder_type = 'vmix'
-        AND json_valid(configuration_snapshot)
         AND (
-          json_extract(configuration_snapshot, '$.manifestKey') = ?
-          OR json_extract(configuration_snapshot, '$.manifestPath') = ?
+          manifest_path = ?
+          OR (
+            json_valid(configuration_snapshot)
+            AND (
+              json_extract(configuration_snapshot, '$.manifestKey') = ?
+              OR json_extract(configuration_snapshot, '$.manifestPath') = ?
+            )
+          )
         )
       LIMIT 1
-    `).get(manifestKey, manifestPath))
+    `).get(manifestPath, manifestKey, manifestPath)
+    return row ? this.mapSession(row) : undefined
   }
   createSession(session: NewSession, files: NewSessionFile[]): CaptureSession {
     const now = new Date().toISOString()
@@ -163,13 +244,17 @@ export class LedgerDatabase {
     const insert = this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO capture_sessions
-        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,configuration_snapshot,error_message,hidden,upload_excluded,created_at,updated_at)
-        VALUES (@id,@recorderType,@status,@sessionStart,@sessionEnd,@finalizationSource,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@configurationSnapshot,NULL,0,0,@createdAt,@updatedAt)
-      `).run({ ...session, descriptProjectName, id, createdAt: now, updatedAt: now })
+        (id,recorder_type,status,session_start,session_end,finalization_source,descript_folder_path,descript_project_name,descript_project_id,descript_job_id,descript_project_url,timeline_timebase,timeline_ntsc,sync_mode,manifest_path,manifest_hash,import_attempt_id,import_payload_hash,configuration_snapshot,error_message,hidden,upload_excluded,created_at,updated_at)
+        VALUES (@id,@recorderType,@status,@sessionStart,@sessionEnd,@finalizationSource,@descriptFolderPath,@descriptProjectName,@descriptProjectId,@descriptJobId,@descriptProjectUrl,@timelineTimebase,@timelineNtsc,@syncMode,@manifestPath,@manifestHash,@importAttemptId,@importPayloadHash,@configurationSnapshot,NULL,0,0,@createdAt,@updatedAt)
+      `).run({
+        ...session,
+        timelineNtsc: session.timelineNtsc == null ? null : Number(session.timelineNtsc),
+        descriptProjectName, id, createdAt: now, updatedAt: now
+      })
       const statement = this.db.prepare(`
         INSERT INTO session_files
-        (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,stability_status,upload_status,error_message,discovered_at,updated_at)
-        VALUES (@id,@sessionId,@locationId,@sourceLabel,@sourceRole,@localPath,@originalFilename,@descriptMediaKey,@contentType,@fileSize,@modifiedAt,@segmentIndex,@stabilityStatus,@uploadStatus,NULL,@discoveredAt,@updatedAt)
+        (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at)
+        VALUES (@id,@sessionId,@locationId,@sourceLabel,@sourceRole,@localPath,@originalFilename,@descriptMediaKey,@contentType,@fileSize,@modifiedAt,@segmentIndex,@manifestTrackIndex,@manifestClipIndex,@manifestClipId,@timelineStartFrame,@timelineEndFrame,@stabilityStatus,@uploadStatus,NULL,@discoveredAt,@updatedAt)
       `)
       files.forEach((file) => statement.run({ ...file, id: randomUUID(), sessionId: id, discoveredAt: now, updatedAt: now }))
     })
@@ -181,8 +266,8 @@ export class LedgerDatabase {
     const id = randomUUID()
     this.db.prepare(`
       INSERT INTO session_files
-      (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,stability_status,upload_status,error_message,discovered_at,updated_at)
-      VALUES (@id,@sessionId,@locationId,@sourceLabel,@sourceRole,@localPath,@originalFilename,@descriptMediaKey,@contentType,@fileSize,@modifiedAt,@segmentIndex,@stabilityStatus,@uploadStatus,NULL,@discoveredAt,@updatedAt)
+      (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at)
+      VALUES (@id,@sessionId,@locationId,@sourceLabel,@sourceRole,@localPath,@originalFilename,@descriptMediaKey,@contentType,@fileSize,@modifiedAt,@segmentIndex,@manifestTrackIndex,@manifestClipIndex,@manifestClipId,@timelineStartFrame,@timelineEndFrame,@stabilityStatus,@uploadStatus,NULL,@discoveredAt,@updatedAt)
     `).run({ ...file, id, sessionId, discoveredAt: now, updatedAt: now })
     return mapSessionFile(this.db.prepare('SELECT * FROM session_files WHERE id = ?').get(id))
   }
@@ -193,12 +278,25 @@ export class LedgerDatabase {
     while (exists.get(folderPath, `${requestedName}-${String(suffix).padStart(2, '0')}`)) suffix += 1
     return `${requestedName}-${String(suffix).padStart(2, '0')}`
   }
-  updateSession(id: string, values: Partial<Pick<CaptureSession, 'status' | 'sessionEnd' | 'finalizationSource' | 'errorMessage' | 'descriptProjectName' | 'descriptProjectId' | 'descriptJobId'>>): void {
+  updateSession(id: string, values: Partial<Pick<CaptureSession,
+    'status' | 'sessionStart' | 'sessionEnd' | 'finalizationSource' | 'errorMessage' | 'descriptFolderPath' |
+    'descriptProjectName' | 'descriptProjectId' | 'descriptJobId' | 'descriptProjectUrl' | 'timelineTimebase' |
+    'timelineNtsc' | 'syncMode' | 'manifestPath' | 'manifestHash' | 'importAttemptId' | 'importPayloadHash' |
+    'configurationSnapshot'
+  >>): void {
     const columns = Object.keys(values)
     if (!columns.length) return
-    const names: Record<string, string> = { sessionEnd: 'session_end', finalizationSource: 'finalization_source', errorMessage: 'error_message', descriptProjectName: 'descript_project_name', descriptProjectId: 'descript_project_id', descriptJobId: 'descript_job_id' }
+    const names: Record<string, string> = {
+      sessionStart: 'session_start', sessionEnd: 'session_end', finalizationSource: 'finalization_source', errorMessage: 'error_message',
+      descriptFolderPath: 'descript_folder_path', descriptProjectName: 'descript_project_name', descriptProjectId: 'descript_project_id',
+      descriptJobId: 'descript_job_id', descriptProjectUrl: 'descript_project_url', timelineTimebase: 'timeline_timebase',
+      timelineNtsc: 'timeline_ntsc', syncMode: 'sync_mode', manifestPath: 'manifest_path', manifestHash: 'manifest_hash',
+      importAttemptId: 'import_attempt_id', importPayloadHash: 'import_payload_hash', configurationSnapshot: 'configuration_snapshot'
+    }
     const set = columns.map((key) => `${names[key] ?? key} = @${key}`).join(', ')
-    this.db.prepare(`UPDATE capture_sessions SET ${set}, updated_at = @updatedAt WHERE id = @id`).run({ ...values, id, updatedAt: new Date().toISOString() })
+    const parameters: Record<string, unknown> = { ...values, id, updatedAt: new Date().toISOString() }
+    if (values.timelineNtsc !== undefined) parameters.timelineNtsc = values.timelineNtsc == null ? null : Number(values.timelineNtsc)
+    this.db.prepare(`UPDATE capture_sessions SET ${set}, updated_at = @updatedAt WHERE id = @id`).run(parameters)
   }
   retryProjectName(session: CaptureSession): string {
     const previousRetry = session.descriptProjectName.match(/ \(retry (\d+)\)$/)
@@ -208,12 +306,32 @@ export class LedgerDatabase {
     while (exists.get(session.id, session.descriptFolderPath, `${base} (retry ${retry})`)) retry += 1
     return `${base} (retry ${retry})`
   }
-  updateFile(id: string, values: Partial<Pick<SessionFile, 'sourceRole' | 'uploadStatus' | 'stabilityStatus' | 'errorMessage' | 'fileSize' | 'modifiedAt'>>): void {
+  updateFile(id: string, values: Partial<Pick<SessionFile,
+    'sourceRole' | 'uploadStatus' | 'stabilityStatus' | 'errorMessage' | 'fileSize' | 'modifiedAt' | 'localPath' |
+    'manifestTrackIndex' | 'manifestClipIndex' | 'manifestClipId' | 'timelineStartFrame' | 'timelineEndFrame'
+  >>): void {
     const columns = Object.keys(values)
     if (!columns.length) return
-    const names: Record<string, string> = { sourceRole: 'source_role', uploadStatus: 'upload_status', stabilityStatus: 'stability_status', errorMessage: 'error_message', fileSize: 'file_size', modifiedAt: 'modified_at' }
+    const names: Record<string, string> = {
+      sourceRole: 'source_role', uploadStatus: 'upload_status', stabilityStatus: 'stability_status', errorMessage: 'error_message',
+      fileSize: 'file_size', modifiedAt: 'modified_at', localPath: 'local_path', manifestTrackIndex: 'manifest_track_index',
+      manifestClipIndex: 'manifest_clip_index', manifestClipId: 'manifest_clip_id', timelineStartFrame: 'timeline_start_frame',
+      timelineEndFrame: 'timeline_end_frame'
+    }
     const set = columns.map((key) => `${names[key] ?? key} = @${key}`).join(', ')
     this.db.prepare(`UPDATE session_files SET ${set}, updated_at = @updatedAt WHERE id = @id`).run({ ...values, id, updatedAt: new Date().toISOString() })
+  }
+  replaceSessionFiles(sessionId: string, files: NewSessionFile[]): void {
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM session_files WHERE session_id = ?').run(sessionId)
+      const statement = this.db.prepare(`
+        INSERT INTO session_files
+        (id,session_id,location_id,source_label,source_role,local_path,original_filename,descript_media_key,content_type,file_size,modified_at,segment_index,manifest_track_index,manifest_clip_index,manifest_clip_id,timeline_start_frame,timeline_end_frame,stability_status,upload_status,error_message,discovered_at,updated_at)
+        VALUES (@id,@sessionId,@locationId,@sourceLabel,@sourceRole,@localPath,@originalFilename,@descriptMediaKey,@contentType,@fileSize,@modifiedAt,@segmentIndex,@manifestTrackIndex,@manifestClipIndex,@manifestClipId,@timelineStartFrame,@timelineEndFrame,@stabilityStatus,@uploadStatus,@errorMessage,@discoveredAt,@updatedAt)
+      `)
+      files.forEach((file) => statement.run({ ...file, id: randomUUID(), sessionId, errorMessage: null, discoveredAt: now, updatedAt: now }))
+    })()
   }
   getPendingSessions(): CaptureSession[] {
     return this.db.prepare("SELECT * FROM capture_sessions WHERE deleted = 0 AND (status IN ('uploading','processing') OR (status = 'ready' AND upload_excluded = 0)) ORDER BY created_at ASC").all().map((row) => this.mapSession(row))
@@ -273,12 +391,22 @@ export class LedgerDatabase {
   close(): void { this.db.close() }
 
   private mapSession(row: any): CaptureSession {
-    const files = this.db.prepare('SELECT * FROM session_files WHERE session_id = ? ORDER BY CASE source_role WHEN \'primary\' THEN 0 ELSE 1 END, source_label, segment_index, discovered_at').all(row.id).map(mapSessionFile)
+    const files = this.db.prepare(`
+      SELECT * FROM session_files WHERE session_id = ?
+      ORDER BY CASE source_role WHEN 'primary' THEN 0 ELSE 1 END,
+        COALESCE(manifest_track_index, 2147483647), COALESCE(timeline_start_frame, 2147483647),
+        COALESCE(manifest_clip_index, 2147483647), segment_index, descript_media_key
+    `).all(row.id).map(mapSessionFile)
     return {
       id: row.id, recorderType: row.recorder_type as RecorderType, status: row.status as CaptureSessionStatus,
       sessionStart: row.session_start, sessionEnd: row.session_end, finalizationSource: row.finalization_source,
       descriptFolderPath: row.descript_folder_path, descriptProjectName: row.descript_project_name,
       descriptProjectId: row.descript_project_id, descriptJobId: row.descript_job_id,
+      descriptProjectUrl: row.descript_project_url,
+      timelineTimebase: row.timeline_timebase == null ? null : Number(row.timeline_timebase),
+      timelineNtsc: row.timeline_ntsc == null ? null : Boolean(row.timeline_ntsc),
+      syncMode: row.sync_mode ?? 'unknown', manifestPath: row.manifest_path, manifestHash: row.manifest_hash,
+      importAttemptId: row.import_attempt_id, importPayloadHash: row.import_payload_hash,
       configurationSnapshot: row.configuration_snapshot, errorMessage: row.error_message, hidden: Boolean(row.hidden),
       uploadExcluded: Boolean(row.upload_excluded),
       createdAt: row.created_at, updatedAt: row.updated_at, files
@@ -292,6 +420,11 @@ function mapSessionFile(row: any): SessionFile {
     sourceRole: row.source_role, localPath: row.local_path, originalFilename: row.original_filename,
     descriptMediaKey: row.descript_media_key, contentType: row.content_type, fileSize: row.file_size,
     modifiedAt: row.modified_at, segmentIndex: row.segment_index,
+    manifestTrackIndex: row.manifest_track_index == null ? null : Number(row.manifest_track_index),
+    manifestClipIndex: row.manifest_clip_index == null ? null : Number(row.manifest_clip_index),
+    manifestClipId: row.manifest_clip_id,
+    timelineStartFrame: row.timeline_start_frame == null ? null : Number(row.timeline_start_frame),
+    timelineEndFrame: row.timeline_end_frame == null ? null : Number(row.timeline_end_frame),
     stabilityStatus: row.stability_status as SessionFileStabilityStatus,
     uploadStatus: row.upload_status as SessionFileUploadStatus, errorMessage: row.error_message,
     discoveredAt: row.discovered_at, updatedAt: row.updated_at

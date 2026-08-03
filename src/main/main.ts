@@ -123,9 +123,10 @@ app.whenReady().then(async () => {
   registerIpc(); await createWindow()
   setTimeout(() => void checkForUpdates(), 3_000)
   setInterval(() => void checkForUpdates(), 6 * 60 * 60_000)
-  void initializeRecordersAndWatcher().catch(() => {
-    if (!watcher.isWatching()) void watcher.start().catch(() => undefined)
-  })
+  void initializeRecordersAndWatcher()
+    .then(() => descript.reconcile())
+    .then(broadcast)
+    .catch(() => { if (!watcher.isWatching()) void watcher.start().catch(() => undefined) })
   setInterval(() => void descript.reconcile().then(broadcast).catch((error) => {
     ledger.addActivity('error', error instanceof Error ? error.message : String(error))
     broadcast()
@@ -206,8 +207,19 @@ function registerIpc(): void {
       throw new Error(`This session still owns active Descript job ${session.descriptJobId}. Cancel it before creating a replacement import.`)
     }
     const retryName = session.descriptJobId ? ledger.retryProjectName(session) : session.descriptProjectName
-    ledger.updateSession(id, { status: 'ready', errorMessage: null, descriptProjectName: retryName, descriptJobId: null, descriptProjectId: null })
-    session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => ledger.updateFile(file.id, { uploadStatus: 'pending', errorMessage: null }))
+    ledger.updateSession(id, {
+      status: session.recorderType === 'vmix' && session.syncMode === 'unknown' ? 'needs_review' : 'ready',
+      errorMessage: null,
+      descriptProjectName: retryName,
+      descriptJobId: null,
+      descriptProjectId: null,
+      descriptProjectUrl: null,
+      importAttemptId: null,
+      importPayloadHash: null
+    })
+    session.files.filter((file) => file.uploadStatus !== 'excluded').forEach((file) => ledger.updateFile(file.id, {
+      uploadStatus: file.stabilityStatus === 'stable' ? 'pending' : 'missing', errorMessage: null
+    }))
     ledger.addActivity('info', `Reset ${session.descriptProjectName} for retry${retryName === session.descriptProjectName ? '' : ` as ${retryName}`}.`)
     await descript.reconcile(); broadcast()
   })
@@ -246,27 +258,58 @@ function registerIpc(): void {
     ledger.addActivity('warning', `Manual finalization requested for ${ledger.getSession(id)?.descriptProjectName ?? id}.`)
     broadcast()
   })
+  ipcMain.handle('sessions:assumeVmixZero', async (_event, id: string) => {
+    if (vmix.getRecorderState().recording || vmix.getRecorderState().multiCorder) throw new Error('vMix is still recording. Stop both the recorder and MultiCorder first.')
+    await watcher.assumeVmixStartsAtZero(id)
+    broadcast()
+  })
   ipcMain.handle('sessions:recheck', async (_event, id: string) => {
     await watcher.recheckSession(id); broadcast()
   })
-  ipcMain.handle('sessions:setFileExcluded', (_event, sessionId: string, fileId: string, excluded: boolean) => {
+  ipcMain.handle('sessions:setFileExcluded', async (_event, sessionId: string, fileId: string, excluded: boolean) => {
     const session = ledger.getSession(sessionId); if (!session) throw new Error('Session not found.')
     if (['uploading', 'processing', 'completed'].includes(session.status)) throw new Error('Files cannot be changed after upload begins.')
     const file = session.files.find((candidate) => candidate.id === fileId); if (!file) throw new Error('Session file not found.')
     ledger.updateFile(file.id, { uploadStatus: excluded ? 'excluded' : 'pending', errorMessage: null })
     ledger.addActivity('info', `${excluded ? 'Excluded' : 'Included'} ${file.sourceLabel} — ${file.originalFilename}.`)
+    const updated = ledger.getSession(sessionId)!
+    if (updated.recorderType === 'vmix') {
+      const included = updated.files.filter((item) => item.uploadStatus !== 'excluded')
+      const errorMessage = !included.some((item) => item.sourceRole === 'primary')
+        ? 'Select a primary source before uploading.'
+        : included.length > 14
+          ? `This session has ${included.length} physical clips, exceeding Descript's 14-track sequence limit.`
+          : updated.syncMode === 'unknown'
+            ? 'This session has no trustworthy synchronization information.'
+            : included.some((item) => item.stabilityStatus !== 'stable')
+              ? 'Every included file must be stable before upload.'
+              : null
+      ledger.updateSession(sessionId, { status: errorMessage ? 'needs_review' : 'ready', errorMessage })
+      if (!errorMessage && settings.get().uploadsEnabled && !updated.uploadExcluded) await descript.reconcile()
+    }
     broadcast()
   })
-  ipcMain.handle('sessions:setPrimarySource', (_event, sessionId: string, sourceLabel: string) => {
+  ipcMain.handle('sessions:setPrimarySource', async (_event, sessionId: string, sourceLabel: string) => {
     const session = ledger.getSession(sessionId); if (!session) throw new Error('Session not found.')
     if (['uploading', 'processing', 'completed'].includes(session.status)) throw new Error('The primary source cannot change after upload begins.')
     ledger.setPrimarySource(sessionId, sourceLabel)
     ledger.addActivity('info', `Selected ${sourceLabel} as the primary source for ${session.descriptProjectName}.`)
+    const updated = ledger.getSession(sessionId)!
+    const included = updated.files.filter((file) => file.uploadStatus !== 'excluded')
+    if (updated.recorderType === 'vmix' && updated.status === 'needs_review' && updated.syncMode !== 'unknown' &&
+      included.length <= 14 && included.every((file) => file.stabilityStatus === 'stable')) {
+      ledger.updateSession(sessionId, { status: 'ready', errorMessage: null })
+      if (settings.get().uploadsEnabled && !updated.uploadExcluded) await descript.reconcile()
+    }
     broadcast()
   })
   ipcMain.handle('updates:check', () => checkForUpdates())
   ipcMain.handle('updates:open', async () => {
     await shell.openExternal(updateState.releaseUrl ?? releasesUrl)
+  })
+  ipcMain.handle('descript:openProject', async (_event, url: string) => {
+    if (!/^https:\/\/web\.descript\.com\/[A-Za-z0-9-]+(?:[/?#].*)?$/.test(url)) throw new Error('Invalid Descript project URL.')
+    await shell.openExternal(url)
   })
 }
 
@@ -280,5 +323,10 @@ async function validateRecorderSettings(input: SettingsInput): Promise<void> {
     const stats = await fs.stat(input.reconciliationDirectory)
     if (!stats.isDirectory()) throw new Error(`${input.reconciliationDirectory} is not a directory.`)
     await fs.readdir(input.reconciliationDirectory)
+    for (const root of input.vmixRecordingRoots) {
+      const rootStats = await fs.stat(root)
+      if (!rootStats.isDirectory()) throw new Error(`${root} is not a directory.`)
+      await fs.readdir(root)
+    }
   }
 }

@@ -24,9 +24,9 @@ A session may include:
 - Video recordings only; audio-only files are not eligible for upload.
 - Recordings produced by OBS or vMix.
 
-The primary recording’s segments will populate the Descript composition named `Recording`. ISO files will be added to the same project as media assets but will not automatically be arranged in the main composition.
+Every finalized vMix video clip is uploaded intact as a separate track in one Descript multitrack sequence. Manifest frame positions determine track offsets, Program is ordered first, and the `Recording` composition contains that sequence exactly once.
 
-This release will not create a synchronized multicamera timeline inside Descript. It ensures all production media is collected into one project, named consistently, uploaded safely, and recoverable after failures.
+Split recordings use stacked-clip mode: each physical `clipitem` remains an independent sequence track at its XMEML timeline position. The application does not silently concatenate or transcode source media.
 
 ## 2. Problem
 
@@ -82,9 +82,8 @@ The corresponding Descript structure will be:
 <configured root>/<date>/
 └── <session project name>
     ├── Composition: Recording
-    │   ├── Program Part 1
-    │   └── Program Part 2
-    └── Media
+    │   └── MultiCorder Sequence
+    └── Media / MultiCorder Sequence tracks
         ├── Program Part 1
         ├── Program Part 2
         ├── Camera 1 Part 1
@@ -93,7 +92,7 @@ The corresponding Descript structure will be:
         └── Presentation
 ```
 
-Primary segments are placed sequentially in `Recording`. ISO recordings remain available as media for editing. The product does not claim that ISO media is synchronized into a multicamera sequence.
+All physical clips are synchronized in `MultiCorder Sequence` from finalized XMEML frame placement. `Recording` references the sequence once; individual files are never appended directly to the composition.
 
 ## 4. Goals
 
@@ -109,6 +108,7 @@ Primary segments are placed sequentially in `Recording`. ISO recordings remain a
 8. Recover safely from application restarts, network interruptions, and partial uploads.
 9. Preserve existing OBS functionality.
 10. Make the session and individual-file states visible to the operator.
+11. Preserve manifest-derived synchronization within one frame.
 
 ### Secondary goals
 
@@ -122,8 +122,8 @@ Primary segments are placed sequentially in `Recording`. ISO recordings remain a
 
 The initial release will not:
 
-- Build a synchronized multicamera timeline in Descript.
 - Automatically align ISO recordings using timecode or audio.
+- Consolidate split files into one generated file per logical source.
 - Switch camera angles based on the vMix program cut.
 - Transcode unsupported media.
 - Ingest a live NDI, SRT, or SDI stream.
@@ -142,7 +142,7 @@ The initial release will not:
 |---|---|
 | Recorder | OBS or vMix |
 | Capture session | One production recording period and its associated media |
-| Primary source | The source used to create the `Recording` composition |
+| Primary source | The Program or operator-selected source ordered first in the multitrack sequence |
 | ISO source | An independently recorded camera, call, output, or other source |
 | Recording location | A configured local or mounted directory monitored for media |
 | Segment | One of several sequential files generated for the same source |
@@ -181,13 +181,13 @@ The session stays open until both the main recorder and MultiCorder have stopped
 
 The user runs MultiCorder without the main vMix recorder.
 
-One configured ISO location must be designated as the primary source. Its segments populate the `Recording` composition. All other ISO media is included as project media.
+One manifest track must be designated as the primary source. Its physical clips are ordered first in `MultiCorder Sequence`; all other ISO clips follow in manifest order, and `Recording` references the sequence once.
 
 ### 7.5 Split recordings
 
 vMix may split a recording into a new file every configured number of minutes. See the [vMix MultiCorder documentation](https://www.vmix.com/help28/MultiCorder.html).
 
-Every split file remains part of the same capture session. Segments from the primary source are ordered by creation timestamp and placed sequentially into the `Recording` composition.
+Every split file remains part of the same capture session. Each physical XMEML `clipitem` becomes a sequence track whose offset is calculated from its manifest start frame. Split files are not concatenated; a session exceeding 14 physical clips moves to `needs_review`.
 
 The application does not upload a completed segment while the overall session remains active.
 
@@ -454,10 +454,20 @@ A file is stable when:
 - Its modification time is unchanged across the same probes.
 - Probes occur at least two seconds apart.
 - The file remains present and readable.
+- Its video container exposes readable duration, dimensions, native frame rate, frame count when available, and audio-channel metadata.
+- Its reported duration covers the physical source duration declared by XMEML.
+- Its frame rate, frame count, dimensions, and audio-channel count match the XMEML file declaration whenever those fields are present.
+- Its final three seconds decode without a video error.
+- Its size and modification time remain unchanged throughout metadata inspection and tail decoding.
+- It can be opened read-only and its final byte can be read from the same stable snapshot.
 - The file is not known to be the current active output.
 - The session has entered finalization, unless the file is merely being recorded in the ledger without uploading.
 
 A stable split segment may be attached to an active session, but it will not upload until the session closes.
+
+Opening a file with Node's filesystem API is an accessibility check, not proof that an external Windows process has closed every handle. vMix may share a file while it remains open, and Node does not expose an exclusive `CreateFile` share mode. When API status is enabled, active Recorder or MultiCorder state is the authoritative guard; quiet-window, read-handle, ffprobe, and tail-decode checks provide the filesystem fallback.
+
+An empty or not-yet-created file remains pending and is retried by the ten-second scan. If the same unresolved state remains unchanged for ten minutes, the session becomes `needs_review`.
 
 ### 10.4 Files that disappear
 
@@ -503,18 +513,16 @@ interface SessionFile {
 }
 ```
 
-Segments within a source are sorted by:
+Sequence tracks are sorted by:
 
-1. File creation time.
-2. Modification time.
-3. Original filename using natural sorting.
-4. Stable database ID as a final tie-breaker.
+1. Primary source first.
+2. Manifest video-track index.
+3. Timeline start frame.
+4. Manifest clip index.
+5. Existing segment index.
+6. Descript media key.
 
-The assigned segment order is persisted before upload and does not change afterward.
-
-Primary segments are added to the `Recording` composition in this order.
-
-ISO segments are uploaded as media but are not appended to `Recording`.
+Creation and modification timestamps may help discovery, but never determine synchronization. `Recording` contains `MultiCorder Sequence` exactly once.
 
 ## 12. Descript project behavior
 
@@ -572,6 +580,13 @@ Conceptual request:
     "Camera 2 — Camera 2 001.mp4": {
       "content_type": "video/mp4",
       "file_size": 1211345123
+    },
+    "MultiCorder Sequence": {
+      "tracks": [
+        { "media": "Program — Program 001.mp4", "offset": 0 },
+        { "media": "Camera 1 — Camera 1 001.mp4", "offset": 0 },
+        { "media": "Camera 2 — Camera 2 001.mp4", "offset": 1.5015 }
+      ]
     }
   },
   "add_compositions": [
@@ -579,7 +594,7 @@ Conceptual request:
       "name": "Recording",
       "clips": [
         {
-          "media": "Program — Program 001.mp4"
+          "media": "MultiCorder Sequence"
         }
       ]
     }
@@ -587,17 +602,16 @@ Conceptual request:
 }
 ```
 
-When the primary recording has multiple segments, all segments appear sequentially in `clips`.
+The composition always contains one sequence clip. When a source has multiple physical segments, each segment is a separate sequence track with its own manifest-derived offset.
 
 ### 12.4 Upload order
 
 Files upload sequentially by default:
 
-1. Primary segments.
-2. ISO sources in configured location order.
-3. Segments within each source in chronological order.
+1. Primary physical clips.
+2. Remaining clips in manifest-track and timeline order.
 
-Sequential uploads reduce bandwidth contention and simplify retry behavior.
+Uploads use bounded concurrency of two files to avoid saturating the recording disk.
 
 The implementation must stream files from disk and must not load entire files into memory.
 
@@ -678,6 +692,13 @@ CREATE TABLE capture_sessions (
   descript_project_name TEXT NOT NULL,
   descript_project_id TEXT,
   descript_job_id TEXT,
+  timeline_timebase INTEGER,
+  timeline_ntsc INTEGER,
+  sync_mode TEXT NOT NULL DEFAULT 'unknown',
+  manifest_path TEXT,
+  manifest_hash TEXT,
+  import_attempt_id TEXT,
+  import_payload_hash TEXT,
   configuration_snapshot TEXT NOT NULL,
   error_message TEXT,
   hidden INTEGER NOT NULL DEFAULT 0,
@@ -704,13 +725,18 @@ CREATE TABLE session_files (
   location_id TEXT NOT NULL,
   source_label TEXT NOT NULL,
   source_role TEXT NOT NULL,
-  local_path TEXT NOT NULL UNIQUE,
+  local_path TEXT NOT NULL,
   original_filename TEXT NOT NULL,
   descript_media_key TEXT NOT NULL,
   content_type TEXT NOT NULL,
   file_size INTEGER NOT NULL,
   modified_at TEXT NOT NULL,
   segment_index INTEGER NOT NULL,
+  manifest_track_index INTEGER,
+  manifest_clip_index INTEGER,
+  manifest_clip_id TEXT,
+  timeline_start_frame INTEGER,
+  timeline_end_frame INTEGER,
   stability_status TEXT NOT NULL,
   upload_status TEXT NOT NULL,
   error_message TEXT,
@@ -728,6 +754,7 @@ Per-file upload status:
 type SessionFileUploadStatus =
   | 'pending'
   | 'uploading'
+  | 'transferred'
   | 'uploaded'
   | 'failed'
   | 'excluded'
@@ -756,6 +783,8 @@ Immediately after Descript creates an import job, persist:
 
 - Project ID.
 - Job ID.
+- Project URL.
+- Import attempt ID and a SHA-256 of the exact import payload.
 - Every returned media upload target’s association with its local file.
 - Current per-file state.
 
@@ -767,7 +796,7 @@ If one file fails:
 
 - Stop starting additional transfers.
 - Mark the failed file.
-- Preserve already-uploaded file states.
+- Preserve files whose bytes reached the signed URL as `transferred`.
 - Mark the session `failed`.
 - Do not mark the project completed.
 - Show the exact failed source and filename.
@@ -776,16 +805,9 @@ If one file fails:
 
 Retry must first inspect the stored Descript job.
 
-If the job is still active and accepts additional uploads:
+If the job is still active, resume polling it before taking any replacement action. If it stopped successfully, reconcile every expected media key and `Recording` before completing the session.
 
-- Retry only pending or failed files.
-
-If the remote job has terminated unsuccessfully:
-
-- Do not infer success merely because a project with the same name exists.
-- Attempt best-effort cancellation.
-- Require operator confirmation before creating a replacement import if doing so may produce an orphaned duplicate.
-- Clearly identify the existing remote project ID.
+If any signed-URL transfer was interrupted and the old job cannot complete successfully, create a newly named project and submit the full request again. Do not patch an incomplete project with another sequence/composition request.
 
 ### 15.4 Reconciliation
 
@@ -1052,51 +1074,52 @@ The release is successful when:
 18. Zero-byte files are never queued for upload.
 19. Growing files are never queued for upload.
 20. Files must pass three stability probes.
-21. A late-created file resets finalization.
-22. A missing file moves the session to `needs_review`.
-23. An API connection loss does not automatically finalize an active session.
-24. The operator can manually finalize a stable session after a connection loss.
+21. vMix files must expose valid media metadata, match the XMEML file declaration, cover its source duration, and pass a final-tail decode before upload.
+22. A late-created file resets finalization.
+23. A missing file moves the session to `needs_review`.
+24. An API connection loss does not automatically finalize an active session.
+25. The operator can manually finalize a stable session after a connection loss.
 
 ### Descript behavior
 
-25. One session creates one Descript project.
-26. All eligible session files are declared in one import request.
-27. Primary segments populate the `Recording` composition.
-28. Primary segments are chronologically ordered.
-29. ISO media is uploaded without being appended sequentially to the primary composition.
-30. An ISO-only session requires a designated primary source.
-31. Unsupported formats are blocked before the import request.
-32. The project destination is based on the session’s persisted start time.
-33. Changing destination settings does not move an existing session.
-34. Completion requires successful Descript job status.
-35. Project-name matching alone cannot complete a multi-file session.
+26. One session creates one Descript project.
+27. All eligible session files are declared in one import request.
+28. `Recording` contains `MultiCorder Sequence` exactly once.
+29. Program tracks appear first, followed by deterministic manifest order.
+30. Every physical clip is a sequence track at its normalized XMEML frame offset.
+31. An ISO-only session requires a designated primary source.
+32. Unsupported formats are blocked before the import request.
+33. The project destination is based on the session’s persisted start time.
+34. Changing destination settings does not move an existing session.
+35. Completion requires successful Descript job status.
+36. Project-name matching alone cannot complete a multi-file session.
 
 ### Recovery
 
-36. Restarting during recording restores the open session.
-37. Restarting during finalization resumes stability checks.
-38. Restarting before upload returns a ready session to the queue.
-39. Restarting during processing resumes job polling.
-40. Missing network volumes produce a recoverable visible state.
-41. Existing single-file recording rows migrate without losing project or status data.
-42. Migration can run more than once without duplicating sessions.
+37. Restarting during recording restores the open session.
+38. Restarting during finalization resumes stability checks.
+39. Restarting before upload returns a ready session to the queue.
+40. Restarting during processing resumes job polling.
+41. Missing network volumes produce a recoverable visible state.
+42. Existing single-file recording rows migrate without losing project or status data.
+43. Migration can run more than once without duplicating sessions.
 
 ### Dashboard
 
-43. The dashboard lists sessions rather than individual top-level files.
-44. Each session shows recorder, sources, file count, total size, and destination.
-45. Expanding a session shows every source and file.
-46. Upload and stability errors identify the affected source and filename.
-47. The operator can hide, restore, retry, cancel, and inspect sessions.
-48. The UI clearly distinguishes API-confirmed and filesystem-inferred sessions.
+44. The dashboard lists sessions rather than individual top-level files.
+45. Each session shows recorder, sources, file count, total size, and destination.
+46. Expanding a session shows every source and file.
+47. Upload and stability errors identify the affected source and filename.
+48. The operator can hide, restore, retry, cancel, and inspect sessions.
+49. The UI clearly distinguishes API-confirmed and filesystem-inferred sessions.
 
 ### OBS regression
 
-49. OBS connection and password storage continue to work.
-50. OBS recording-stop events continue to trigger prompt discovery.
-51. OBS’s detected recording directory remains the default primary location.
-52. Existing OBS destination and reconciliation behavior remains intact.
-53. An upgraded OBS installation does not require a database reset.
+50. OBS connection and password storage continue to work.
+51. OBS recording-stop events continue to trigger prompt discovery.
+52. OBS’s detected recording directory remains the default primary location.
+53. Existing OBS destination and reconciliation behavior remains intact.
+54. An upgraded OBS installation does not require a database reset.
 
 ## 26. Delivery phases
 
@@ -1141,6 +1164,7 @@ The release is successful when:
 - Test API disconnection.
 - Test restart during every session state.
 - Test partial Descript upload failures.
+- Run a live three-file direct-upload integration against Descript to verify sequence offsets and endpoint-schema compatibility.
 - Run full OBS regression.
 - Update branding, README, setup instructions, and release notes.
 
@@ -1152,11 +1176,11 @@ The first production release should include:
 - vMix program recording and MultiCorder state.
 - One primary plus multiple ISO locations.
 - One session → one Descript project.
-- Primary split-file composition.
-- ISO files as project media.
+- A Program-first synchronized multitrack sequence.
+- Stacked physical tracks for split Program and ISO clips.
 - Restart recovery.
 - Manual review for ambiguous sessions.
 - Supported-format validation.
 - Session-level dashboard and retry behavior.
 
-Native multicamera synchronization, automatic transcoding, Instant Replay, and automatic historical session reconstruction should remain explicitly deferred.
+Automatic audio/timecode alignment, split-file consolidation, automatic transcoding, Instant Replay, and automatic historical session reconstruction remain explicitly deferred.

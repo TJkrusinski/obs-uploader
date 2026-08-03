@@ -14,6 +14,7 @@ const defaults = (): AppSettings => ({
   recordingDateFormat: 'yy-MM-dd',
   recordingsDirectory: null,
   reconciliationDirectory: null,
+  vmixRecordingRoots: [],
   obsHost: '127.0.0.1',
   obsPort: 4455,
   recorderType: 'obs',
@@ -74,6 +75,9 @@ export class SettingsStore {
         reconciliationDirectory: saved.reconciliationDirectory
           ?? (recorderType === 'vmix' ? legacyVmixDirectory ?? legacyLocations?.find((location) => location.enabled !== false)?.path : null)
           ?? null,
+        vmixRecordingRoots: Array.isArray(saved.vmixRecordingRoots)
+          ? saved.vmixRecordingRoots.filter((path): path is string => typeof path === 'string' && Boolean(path.trim()))
+          : [],
         recorderType,
         recordingDateFormat: normalizeDateFormat(saved.recordingDateFormat ?? defaults().recordingDateFormat)
       }
@@ -93,6 +97,7 @@ export class SettingsStore {
       recordingDateFormat: normalizeDateFormat(input.recordingDateFormat),
       recordingsDirectory: input.recordingsDirectory || null,
       reconciliationDirectory: input.reconciliationDirectory || null,
+      vmixRecordingRoots: [...new Set(input.vmixRecordingRoots.map((path) => path.trim()).filter(Boolean))],
       obsHost: input.obsHost.trim() || '127.0.0.1',
       obsPort: Number(input.obsPort) || 4455,
       recorderType: normalizeRecorderType(input),

@@ -12,8 +12,9 @@ export type CaptureSessionStatus =
   | 'failed'
   | 'canceled'
 export type SessionFileRole = 'primary' | 'iso'
-export type SessionFileUploadStatus = 'pending' | 'uploading' | 'uploaded' | 'failed' | 'excluded' | 'missing'
+export type SessionFileUploadStatus = 'pending' | 'uploading' | 'transferred' | 'uploaded' | 'failed' | 'excluded' | 'missing'
 export type SessionFileStabilityStatus = 'pending' | 'probing' | 'stable' | 'unsupported' | 'missing'
+export type VmixSyncMode = 'manifest' | 'assumed_zero' | 'unknown'
 
 export interface AppSettings {
   uploadsEnabled: boolean
@@ -22,6 +23,7 @@ export interface AppSettings {
   recordingDateFormat: RecordingDateFormat
   recordingsDirectory: string | null
   reconciliationDirectory: string | null
+  vmixRecordingRoots: string[]
   obsHost: string
   obsPort: number
   recorderType: RecorderType
@@ -43,6 +45,11 @@ export interface SessionFile {
   fileSize: number
   modifiedAt: string
   segmentIndex: number
+  manifestTrackIndex: number | null
+  manifestClipIndex: number | null
+  manifestClipId: string | null
+  timelineStartFrame: number | null
+  timelineEndFrame: number | null
   stabilityStatus: SessionFileStabilityStatus
   uploadStatus: SessionFileUploadStatus
   errorMessage: string | null
@@ -61,6 +68,14 @@ export interface CaptureSession {
   descriptProjectName: string
   descriptProjectId: string | null
   descriptJobId: string | null
+  descriptProjectUrl: string | null
+  timelineTimebase: number | null
+  timelineNtsc: boolean | null
+  syncMode: VmixSyncMode
+  manifestPath: string | null
+  manifestHash: string | null
+  importAttemptId: string | null
+  importPayloadHash: string | null
   configurationSnapshot: string
   errorMessage: string | null
   hidden: boolean
@@ -134,11 +149,13 @@ export interface DesktopApi {
   setSessionHidden: (id: string, hidden: boolean) => Promise<void>
   setSessionUploadExcluded: (id: string, excluded: boolean) => Promise<void>
   finalizeSession: (id: string) => Promise<void>
+  assumeVmixZero: (id: string) => Promise<void>
   recheckSession: (id: string) => Promise<void>
   setSessionFileExcluded: (sessionId: string, fileId: string, excluded: boolean) => Promise<void>
   setPrimarySource: (sessionId: string, sourceLabel: string) => Promise<void>
   checkForUpdates: () => Promise<UpdateState>
   openUpdatePage: () => Promise<void>
+  openDescriptProject: (url: string) => Promise<void>
   onStateChanged: (callback: (state: AppSnapshot) => void) => () => void
 }
 

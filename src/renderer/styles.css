@@ -5,7 +5,7 @@
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: #050505; color: #d7d7d7; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 
 .app-shell { min-height: 100vh; background: #050505; }
@@ -96,6 +96,8 @@ button { cursor: pointer; }
 .expand-button svg { transition: transform .15s ease; }
 .expand-button.expanded svg { transform: rotate(90deg); }
 .session-details { display: grid; gap: 12px; padding: 0 16px 16px 52px; }
+.session-sync-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; color: #b8c7dc; font-size: 12px; }
+.session-sync-summary span { border: 1px solid #26364d; border-radius: 999px; padding: 5px 9px; background: #10192a; }
 .session-error { display: flex; align-items: center; gap: 7px; margin: 0; color: #df999d; font-size: 12px; }
 .session-detail-actions { display: flex; align-items: center; gap: 8px; }
 .session-detail-actions select { width: auto; min-width: 180px; margin-left: auto; }
@@ -128,8 +130,9 @@ button { cursor: pointer; }
 .settings-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; align-items: start; gap: 12px; }.settings-stack { display: grid; gap: 12px; }
 .setting-card { padding: 19px; }.setting-card-header { margin-bottom: 18px; border-bottom: 1px solid #292929; padding-bottom: 16px; }.setting-card-header p { margin: 5px 0 0; color: #777; font-size: 12px; }
 .form-fields { display: grid; gap: 8px; }.form-fields label { margin-top: 5px; color: #aaa; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
-.form-fields input, .form-fields select { width: 100%; border: 1px solid #303030; border-radius: 3px; padding: 9px 10px; outline: none; background: #070707; color: #d8d8d8; font-size: 13px; }
-.form-fields input:focus, .form-fields select:focus { border-color: #a2851d; box-shadow: 0 0 0 1px #a2851d; }
+.form-fields input, .form-fields select, .form-fields textarea { width: 100%; border: 1px solid #303030; border-radius: 3px; padding: 9px 10px; outline: none; background: #070707; color: #d8d8d8; font-size: 13px; }
+.form-fields textarea { min-height: 76px; resize: vertical; }
+.form-fields input:focus, .form-fields select:focus, .form-fields textarea:focus { border-color: #a2851d; box-shadow: 0 0 0 1px #a2851d; }
 .field-help { margin: 0 0 5px; color: #777; font-size: 11px; line-height: 1.4; }.field-help.token-saved { color: #aaa; }
 .update-status { margin: 0 0 6px; color: #999; font-size: 12px; line-height: 1.45; }
 .update-status.available { color: #d4bb62; }.update-status.current { color: #9ec6a8; }.update-status.error { color: #d8a0a3; }

@@ -20,11 +20,13 @@ const desktopApi: DesktopApi = {
   setSessionHidden: (id, hidden) => ipcRenderer.invoke('sessions:setHidden', id, hidden),
   setSessionUploadExcluded: (id, excluded) => ipcRenderer.invoke('sessions:setUploadExcluded', id, excluded),
   finalizeSession: (id) => ipcRenderer.invoke('sessions:finalize', id),
+  assumeVmixZero: (id) => ipcRenderer.invoke('sessions:assumeVmixZero', id),
   recheckSession: (id) => ipcRenderer.invoke('sessions:recheck', id),
   setSessionFileExcluded: (sessionId, fileId, excluded) => ipcRenderer.invoke('sessions:setFileExcluded', sessionId, fileId, excluded),
   setPrimarySource: (sessionId, sourceLabel) => ipcRenderer.invoke('sessions:setPrimarySource', sessionId, sourceLabel),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openUpdatePage: () => ipcRenderer.invoke('updates:open'),
+  openDescriptProject: (url) => ipcRenderer.invoke('descript:openProject', url),
   onStateChanged: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: Parameters<typeof callback>[0]) => callback(state)
     ipcRenderer.on('app:stateChanged', listener)
