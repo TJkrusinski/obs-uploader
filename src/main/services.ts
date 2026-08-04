@@ -8,7 +8,7 @@ import type { CaptureSession, ConnectionState, RecordingDateFormat, SessionFile,
 import { LedgerDatabase, type NewSessionFile } from './database.js'
 import { buildDescriptImportBody } from './descript-import.js'
 import { SettingsStore } from './settings.js'
-import { actualFramesPerSecond, filenameFromVmixPath, parseVmixTimeline, vmixProjectNameFromManifest, type VmixTimeline } from './vmix-manifest.js'
+import { filenameFromVmixPath, parseVmixTimeline, vmixProjectNameFromManifest, type VmixTimeline } from './vmix-manifest.js'
 import { resolveVmixSourcePath, VmixMediaNotFoundError } from './vmix-file-resolution.js'
 import { inspectVmixProjectContents, type VmixProjectContents } from './vmix-reconciliation.js'
 import { validateFinalizedVideo, type ExpectedVideoMetadata } from './media-validation.js'
@@ -135,12 +135,7 @@ function mergeExpectedVideoMetadata(
     return first ?? second ?? null
   }
   return {
-    durationSeconds: Math.max(left.durationSeconds, right.durationSeconds),
-    frameRate: merge('frame-rate', left.frameRate, right.frameRate),
-    frameCount: merge('frame-count', left.frameCount, right.frameCount),
-    width: merge('width', left.width, right.width),
-    height: merge('height', left.height, right.height),
-    audioChannels: merge('audio-channel', left.audioChannels, right.audioChannels)
+    frameCount: merge('frame-count', left.frameCount, right.frameCount)
   }
 }
 
@@ -661,18 +656,8 @@ export class RecordingWatcher {
       const uniquePaths = [...new Set(resolved.map((item) => item.mediaPath))]
       const expectedMetadataByPath = new Map<string, ExpectedVideoMetadata>()
       for (const item of resolved) {
-        const mediaRate = item.clip.mediaRate
-        const framesPerSecond = actualFramesPerSecond(mediaRate ?? timeline.rate)
-        const coverageFrames = item.clip.mediaDurationFrames
-          ?? item.clip.sourceOutFrame
-          ?? (item.clip.endFrame - item.clip.startFrame)
         const expected: ExpectedVideoMetadata = {
-          durationSeconds: coverageFrames / framesPerSecond,
-          frameRate: mediaRate ? framesPerSecond : null,
-          frameCount: item.clip.mediaDurationFrames,
-          width: item.clip.mediaWidth,
-          height: item.clip.mediaHeight,
-          audioChannels: item.clip.mediaAudioChannels
+          frameCount: item.clip.mediaDurationFrames
         }
         expectedMetadataByPath.set(
           item.mediaPath,

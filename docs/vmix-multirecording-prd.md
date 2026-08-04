@@ -454,9 +454,8 @@ A file is stable when:
 - Its modification time is unchanged across the same probes.
 - Probes occur at least two seconds apart.
 - The file remains present and readable.
-- Its video container exposes readable duration, dimensions, native frame rate, frame count when available, and audio-channel metadata.
-- Its reported duration covers the physical source duration declared by XMEML.
-- Its frame rate, frame count, dimensions, and audio-channel count match the XMEML file declaration whenever those fields are present.
+- Its video container exposes a readable video stream and a usable frame count when XMEML declares one.
+- Its video-frame count is within 100 frames or 3% of the XMEML file declaration, whichever tolerance is greater, when present; duration, frame rate, dimensions, and audio-channel count are not compared with XMEML.
 - Its final three seconds decode without a video error.
 - Its size and modification time remain unchanged throughout metadata inspection and tail decoding.
 - It can be opened read-only and its final byte can be read from the same stable snapshot.

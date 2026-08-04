@@ -8,6 +8,8 @@ const ffprobeInstaller = require('@ffprobe-installer/ffprobe') as { path?: strin
 const installedFfmpegPath = require('ffmpeg-static') as string | null
 const TAIL_DECODE_SECONDS = 3
 const DURATION_TOLERANCE_SECONDS = 0.25
+const FRAME_COUNT_TOLERANCE_RATIO = 0.03
+const MINIMUM_FRAME_COUNT_TOLERANCE = 100
 
 interface ProbeOutput {
   streams?: Array<{
@@ -25,12 +27,7 @@ interface ProbeOutput {
 }
 
 export interface ExpectedVideoMetadata {
-  durationSeconds: number
-  frameRate?: number | null
   frameCount?: number | null
-  width?: number | null
-  height?: number | null
-  audioChannels?: number | null
 }
 
 export interface FinalizedVideoValidation {
@@ -130,6 +127,11 @@ export function reliableFrameCount(
   return Math.abs(frameCount - durationDerivedFrames) <= toleranceFrames ? frameCount : null
 }
 
+export function frameCountsWithinTolerance(actualFrameCount: number, expectedFrameCount: number): boolean {
+  const toleranceFrames = Math.max(MINIMUM_FRAME_COUNT_TOLERANCE, expectedFrameCount * FRAME_COUNT_TOLERANCE_RATIO)
+  return Math.abs(actualFrameCount - expectedFrameCount) <= toleranceFrames
+}
+
 /**
  * Counts demuxed packets instead of trusting the MP4 stream's nb_frames field.
  * For vMix's H.264/H.265 MP4 output, each selected video packet represents one
@@ -184,8 +186,8 @@ export async function validateFinalizedVideo(
   }
 
   const video = probe.streams?.find((stream) => stream.codec_type === 'video')
-  const width = positiveNumber(video?.width)
-  const height = positiveNumber(video?.height)
+  const width = positiveNumber(video?.width) ?? 0
+  const height = positiveNumber(video?.height) ?? 0
   const durationSeconds = positiveNumber(video?.duration) ?? positiveNumber(probe.format?.duration) ?? 0
   const frameRate = rationalNumber(video?.avg_frame_rate) ?? rationalNumber(video?.r_frame_rate) ?? 0
   const reportedFrameCount = positiveInteger(video?.nb_frames)
@@ -193,19 +195,8 @@ export async function validateFinalizedVideo(
   const audioChannels = probe.streams
     ?.filter((stream) => stream.codec_type === 'audio')
     .reduce((total, stream) => total + (positiveInteger(stream.channels) ?? 0), 0) ?? 0
-  if (!video || !width || !height || durationSeconds <= 0) {
+  if (!video || durationSeconds <= 0) {
     throw new Error(`${label} does not yet have readable, finalized video metadata.`)
-  }
-  if (!Number.isFinite(expected.durationSeconds) || expected.durationSeconds <= 0) {
-    throw new Error(`The vMix timeline has an invalid expected duration for ${label}.`)
-  }
-  if (durationSeconds + DURATION_TOLERANCE_SECONDS < expected.durationSeconds) {
-    throw new Error(
-      `${label} is only ${durationSeconds.toFixed(3)} seconds long, but the vMix timeline requires ${expected.durationSeconds.toFixed(3)} seconds.`
-    )
-  }
-  if (expected.frameRate && (!frameRate || Math.abs(frameRate - expected.frameRate) > Math.max(0.01, expected.frameRate * 0.0002))) {
-    throw new Error(`${label} reports ${frameRate ? frameRate.toFixed(3) : 'no'} fps, but the vMix XML declares ${expected.frameRate.toFixed(3)} fps.`)
   }
   if (expected.frameCount && frameCount === null) {
     try {
@@ -215,14 +206,10 @@ export async function validateFinalizedVideo(
       throw new Error(`${label} has no reliable container frame count, and ffprobe could not count its muxed video packets: ${message}`)
     }
   }
-  if (expected.frameCount && frameCount !== null && frameCount < expected.frameCount) {
-    throw new Error(`${label} contains ${frameCount} video frames, but the vMix XML declares ${expected.frameCount} frames.`)
-  }
-  if (expected.width && expected.height && (width !== expected.width || height !== expected.height)) {
-    throw new Error(`${label} is ${width}x${height}, but the vMix XML declares ${expected.width}x${expected.height}.`)
-  }
-  if (expected.audioChannels && audioChannels !== expected.audioChannels) {
-    throw new Error(`${label} contains ${audioChannels} audio channels, but the vMix XML declares ${expected.audioChannels}.`)
+  if (expected.frameCount && frameCount !== null && !frameCountsWithinTolerance(frameCount, expected.frameCount)) {
+    throw new Error(
+      `${label} contains ${frameCount} video frames, but the vMix XML declares ${expected.frameCount} frames (allowed difference: 100 frames or 3%, whichever is greater).`
+    )
   }
 
   const ffmpegPath = unpackedExecutablePath(installedFfmpegPath, 'ffmpeg')
