@@ -18,6 +18,7 @@ interface ProbeOutput {
     avg_frame_rate?: string
     r_frame_rate?: string
     nb_frames?: string
+    nb_read_packets?: string
     channels?: number
   }>
   format?: { duration?: string }
@@ -111,6 +112,46 @@ function rationalNumber(value: unknown): number | null {
 }
 
 /**
+ * Some MP4 muxers, including vMix's FFmpeg MP4 mode, can leave nb_frames with
+ * a small fragment/sample-table count even though stream duration and rate are
+ * correct. Only treat nb_frames as a real decoded-frame count when it agrees
+ * with those independent fields. A suspect count triggers a packet-counting
+ * probe, while duration coverage and the tail decode remain separate checks.
+ */
+export function reliableFrameCount(
+  reportedFrameCount: unknown,
+  durationSeconds: number,
+  frameRate: number
+): number | null {
+  const frameCount = positiveInteger(reportedFrameCount)
+  if (frameCount === null || durationSeconds <= 0 || frameRate <= 0) return null
+  const durationDerivedFrames = durationSeconds * frameRate
+  const toleranceFrames = Math.max(2, frameRate * DURATION_TOLERANCE_SECONDS)
+  return Math.abs(frameCount - durationDerivedFrames) <= toleranceFrames ? frameCount : null
+}
+
+/**
+ * Counts demuxed packets instead of trusting the MP4 stream's nb_frames field.
+ * For vMix's H.264/H.265 MP4 output, each selected video packet represents one
+ * encoded frame. This scans the file but does not incur a full video decode.
+ */
+export async function countVideoPackets(path: string): Promise<number> {
+  const ffprobePath = unpackedExecutablePath(ffprobeInstaller.path, 'ffprobe')
+  const stdout = await runExecutable(ffprobePath, [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-count_packets',
+    '-show_entries', 'stream=nb_read_packets',
+    '-of', 'json',
+    path
+  ])
+  const probe = JSON.parse(stdout) as ProbeOutput
+  const packetCount = positiveInteger(probe.streams?.[0]?.nb_read_packets)
+  if (packetCount === null) throw new Error('ffprobe did not return a video packet count')
+  return packetCount
+}
+
+/**
  * Verifies that a recording container is complete enough to upload without modifying it.
  * The caller supplies the snapshot captured by the preceding stability probes so changes
  * that occur during metadata inspection or tail decoding are also detected.
@@ -147,7 +188,8 @@ export async function validateFinalizedVideo(
   const height = positiveNumber(video?.height)
   const durationSeconds = positiveNumber(video?.duration) ?? positiveNumber(probe.format?.duration) ?? 0
   const frameRate = rationalNumber(video?.avg_frame_rate) ?? rationalNumber(video?.r_frame_rate) ?? 0
-  const frameCount = positiveInteger(video?.nb_frames)
+  const reportedFrameCount = positiveInteger(video?.nb_frames)
+  let frameCount = reliableFrameCount(reportedFrameCount, durationSeconds, frameRate)
   const audioChannels = probe.streams
     ?.filter((stream) => stream.codec_type === 'audio')
     .reduce((total, stream) => total + (positiveInteger(stream.channels) ?? 0), 0) ?? 0
@@ -164,6 +206,14 @@ export async function validateFinalizedVideo(
   }
   if (expected.frameRate && (!frameRate || Math.abs(frameRate - expected.frameRate) > Math.max(0.01, expected.frameRate * 0.0002))) {
     throw new Error(`${label} reports ${frameRate ? frameRate.toFixed(3) : 'no'} fps, but the vMix XML declares ${expected.frameRate.toFixed(3)} fps.`)
+  }
+  if (expected.frameCount && frameCount === null) {
+    try {
+      frameCount = await countVideoPackets(path)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`${label} has no reliable container frame count, and ffprobe could not count its muxed video packets: ${message}`)
+    }
   }
   if (expected.frameCount && frameCount !== null && frameCount < expected.frameCount) {
     throw new Error(`${label} contains ${frameCount} video frames, but the vMix XML declares ${expected.frameCount} frames.`)

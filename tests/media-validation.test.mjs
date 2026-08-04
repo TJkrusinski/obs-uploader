@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { after, before, test } from 'node:test'
-import { validateFinalizedVideo } from '../dist-electron/main/media-validation.js'
+import { countVideoPackets, reliableFrameCount, validateFinalizedVideo } from '../dist-electron/main/media-validation.js'
 
 const require = createRequire(import.meta.url)
 const ffmpegPath = require('ffmpeg-static')
@@ -14,6 +14,7 @@ const run = promisify(execFile)
 let directory
 let validVideo
 let audioLongerVideo
+let fragmentedVideo
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'obs-upload-media-validation-'))
@@ -31,6 +32,14 @@ before(async () => {
     '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=2',
     '-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'aac',
     audioLongerVideo
+  ])
+  fragmentedVideo = join(directory, 'fragmented.mp4')
+  await run(ffmpegPath, [
+    '-nostdin', '-y',
+    '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=30',
+    '-t', '2', '-c:v', 'mpeg4', '-q:v', '5', '-g', '15',
+    '-movflags', 'empty_moov+default_base_moof+frag_keyframe',
+    fragmentedVideo
   ])
 })
 
@@ -51,6 +60,31 @@ test('accepts a stable video whose metadata and decoded tail cover the XMEML dur
   assert.equal(result.width, 160)
   assert.equal(result.height, 90)
   assert.equal(result.stats.size, snapshot.size)
+})
+
+test('ignores the bogus short nb_frames value emitted for vMix FFmpeg MP4 recordings', () => {
+  const expectedFrames = 110_094
+  const frameRate = 30
+  const durationSeconds = expectedFrames / frameRate
+
+  assert.equal(reliableFrameCount(250, durationSeconds, frameRate), null)
+  assert.equal(reliableFrameCount(String(expectedFrames), durationSeconds, frameRate), expectedFrames)
+})
+
+test('counts muxed video packets without relying on the MP4 nb_frames field', async () => {
+  assert.equal(await countVideoPackets(validVideo), 30)
+})
+
+test('follows every fragment when validating a segmented MP4 with no header frame total', async () => {
+  const result = await validateFinalizedVideo(fragmentedVideo, {
+    durationSeconds: 1.9,
+    frameRate: 30,
+    frameCount: 60,
+    width: 160,
+    height: 90
+  }, await stat(fragmentedVideo))
+
+  assert.equal(result.frameCount, 60)
 })
 
 test('rejects a video shorter than the physical XMEML clip duration', async () => {
