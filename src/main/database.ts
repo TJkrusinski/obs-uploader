@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import type {
-  ActivityItem, CaptureSession, CaptureSessionStatus, RecorderType, SessionFile,
+  ActivityItem, CaptureSession, CaptureSessionStatus, SessionFile,
   SessionFileStabilityStatus, SessionFileUploadStatus
 } from '../shared/types.js'
 
@@ -219,24 +219,6 @@ export class LedgerDatabase {
     const row = this.db.prepare('SELECT * FROM session_files WHERE local_path = ?').get(localPath)
     return row ? mapSessionFile(row) : undefined
   }
-  getVmixSessionByManifest(manifestPath: string, manifestKey: string): CaptureSession | undefined {
-    const row = this.db.prepare(`
-      SELECT * FROM capture_sessions
-      WHERE recorder_type = 'vmix'
-        AND (
-          manifest_path = ?
-          OR (
-            json_valid(configuration_snapshot)
-            AND (
-              json_extract(configuration_snapshot, '$.manifestKey') = ?
-              OR json_extract(configuration_snapshot, '$.manifestPath') = ?
-            )
-          )
-        )
-      LIMIT 1
-    `).get(manifestPath, manifestKey, manifestPath)
-    return row ? this.mapSession(row) : undefined
-  }
   createSession(session: NewSession, files: NewSessionFile[]): CaptureSession {
     const now = new Date().toISOString()
     const id = randomUUID()
@@ -398,7 +380,7 @@ export class LedgerDatabase {
         COALESCE(manifest_clip_index, 2147483647), segment_index, descript_media_key
     `).all(row.id).map(mapSessionFile)
     return {
-      id: row.id, recorderType: row.recorder_type as RecorderType, status: row.status as CaptureSessionStatus,
+      id: row.id, recorderType: row.recorder_type === 'obs' ? 'obs' : 'legacy', status: row.status as CaptureSessionStatus,
       sessionStart: row.session_start, sessionEnd: row.session_end, finalizationSource: row.finalization_source,
       descriptFolderPath: row.descript_folder_path, descriptProjectName: row.descript_project_name,
       descriptProjectId: row.descript_project_id, descriptJobId: row.descript_job_id,

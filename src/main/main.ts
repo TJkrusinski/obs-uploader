@@ -1,9 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
-import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import type { AppSnapshot, ConnectionState, SettingsInput, UpdateState } from '../shared/types.js'
 import { LedgerDatabase } from './database.js'
-import { DescriptService, isBeforeRecordingDay, isSameRecordingDay, ObsService, RecordingWatcher, VmixService } from './services.js'
+import { DescriptService, isBeforeRecordingDay, isSameRecordingDay, ObsService, RecordingWatcher } from './services.js'
 import { SettingsStore } from './settings.js'
 
 let window: BrowserWindow | null = null
@@ -11,7 +10,6 @@ let settings: SettingsStore
 let ledger: LedgerDatabase
 let descript: DescriptService
 let obs: ObsService
-let vmix: VmixService
 let watcher: RecordingWatcher
 let descriptState: ConnectionState['descript'] = 'disconnected'
 let hasDescriptToken = false
@@ -22,8 +20,7 @@ function snapshot(): AppSnapshot {
   return {
     settings: settings.get(),
     hasDescriptToken,
-    connections: { obs: obs.getState(), vmix: vmix.getState(), descript: descriptState, watcher: watcher.isWatching() ? 'watching' : 'stopped' },
-    vmix: vmix.getRecorderState(),
+    connections: { obs: obs.getState(), descript: descriptState, watcher: watcher.isWatching() ? 'watching' : 'stopped' },
     sessions: ledger.getSessions(), activity: ledger.getActivity(),
     activeRecording: ledger.getPendingSessions()[0]?.files[0]?.originalFilename ?? null,
     update: updateState
@@ -47,9 +44,8 @@ async function connectObsAndSync(input: { host: string; port: number; password?:
 
 async function initializeRecordersAndWatcher(): Promise<void> {
   const current = settings.get()
-  if (current.recorderType === 'obs') await connectObsAndSync({ host: current.obsHost, port: current.obsPort })
-  if (current.recorderType === 'vmix' && current.vmixUseApi) vmix.start({ host: current.vmixHost, port: current.vmixPort })
-  if ((current.recorderType === 'obs' && current.recordingsDirectory) || (current.recorderType === 'vmix' && current.reconciliationDirectory)) {
+  await connectObsAndSync({ host: current.obsHost, port: current.obsPort })
+  if (current.recordingsDirectory) {
     if (!watcher.isWatching()) await watcher.start()
   }
 }
@@ -111,15 +107,12 @@ app.whenReady().then(async () => {
   watcher = new RecordingWatcher(settings, ledger, () => broadcast(), async (session) => {
     broadcast()
     try {
-      if (session.recorderType === 'vmix') await descript.reconcile()
-      else await descript.upload(session)
+      await descript.upload(session)
     } catch (error) {
-      if (session.recorderType === 'vmix') ledger.addActivity('error', error instanceof Error ? error.message : String(error))
       throw error
     } finally { broadcast() }
   })
   obs = new ObsService(settings, () => broadcast(), (path) => watcher.recordingStopped(path), (available) => watcher.setObsStopEventsAvailable(available))
-  vmix = new VmixService(() => broadcast(), (recording, multiCorder) => watcher.vmixStateChanged(recording, multiCorder), () => watcher.vmixConnectionLost())
   registerIpc(); await createWindow()
   setTimeout(() => void checkForUpdates(), 3_000)
   setInterval(() => void checkForUpdates(), 6 * 60 * 60_000)
@@ -146,7 +139,7 @@ function registerIpc(): void {
   ipcMain.handle('settings:save', async (_event, input: SettingsInput) => {
     await validateRecorderSettings(input)
     const uploadsWereEnabled = settings.get().uploadsEnabled
-    watcher.stop(); vmix.stop()
+    watcher.stop()
     const result = await settings.save(input)
     hasDescriptToken = await settings.hasDescriptToken()
     void initializeRecordersAndWatcher().catch((error) => {
@@ -175,7 +168,6 @@ function registerIpc(): void {
   ipcMain.handle('obs:connect', async (_event, input: { host: string; port: number; password?: string }) => {
     return connectObsAndSync(input)
   })
-  ipcMain.handle('vmix:connect', async (_event, input: { host: string; port: number }) => vmix.connect(input))
   ipcMain.handle('watcher:start', async () => { await watcher.start(); broadcast() })
   ipcMain.handle('watcher:stop', () => watcher.stop())
   ipcMain.handle('recordings:reconcile', async () => { await watcher.scanReconciliationDirectory(); await descript.reconcile(); broadcast() })
@@ -208,7 +200,7 @@ function registerIpc(): void {
     }
     const retryName = session.descriptJobId ? ledger.retryProjectName(session) : session.descriptProjectName
     ledger.updateSession(id, {
-      status: session.recorderType === 'vmix' && session.syncMode === 'unknown' ? 'needs_review' : 'ready',
+      status: 'ready',
       errorMessage: null,
       descriptProjectName: retryName,
       descriptJobId: null,
@@ -251,18 +243,6 @@ function registerIpc(): void {
       }
     }
   })
-  ipcMain.handle('sessions:finalize', async (_event, id: string) => {
-    if (ledger.getSession(id)?.descriptJobId) throw new Error('This session already has a Descript import job and cannot be finalized into a replacement upload.')
-    if (vmix.getRecorderState().recording || vmix.getRecorderState().multiCorder) throw new Error('vMix is still recording. Stop both the recorder and MultiCorder first.')
-    await watcher.finalizeSessionManually(id)
-    ledger.addActivity('warning', `Manual finalization requested for ${ledger.getSession(id)?.descriptProjectName ?? id}.`)
-    broadcast()
-  })
-  ipcMain.handle('sessions:assumeVmixZero', async (_event, id: string) => {
-    if (vmix.getRecorderState().recording || vmix.getRecorderState().multiCorder) throw new Error('vMix is still recording. Stop both the recorder and MultiCorder first.')
-    await watcher.assumeVmixStartsAtZero(id)
-    broadcast()
-  })
   ipcMain.handle('sessions:recheck', async (_event, id: string) => {
     await watcher.recheckSession(id); broadcast()
   })
@@ -272,21 +252,6 @@ function registerIpc(): void {
     const file = session.files.find((candidate) => candidate.id === fileId); if (!file) throw new Error('Session file not found.')
     ledger.updateFile(file.id, { uploadStatus: excluded ? 'excluded' : 'pending', errorMessage: null })
     ledger.addActivity('info', `${excluded ? 'Excluded' : 'Included'} ${file.sourceLabel} — ${file.originalFilename}.`)
-    const updated = ledger.getSession(sessionId)!
-    if (updated.recorderType === 'vmix') {
-      const included = updated.files.filter((item) => item.uploadStatus !== 'excluded')
-      const errorMessage = !included.some((item) => item.sourceRole === 'primary')
-        ? 'Select a primary source before uploading.'
-        : included.length > 14
-          ? `This session has ${included.length} physical clips, exceeding Descript's 14-track sequence limit.`
-          : updated.syncMode === 'unknown'
-            ? 'This session has no trustworthy synchronization information.'
-            : included.some((item) => item.stabilityStatus !== 'stable')
-              ? 'Every included file must be stable before upload.'
-              : null
-      ledger.updateSession(sessionId, { status: errorMessage ? 'needs_review' : 'ready', errorMessage })
-      if (!errorMessage && settings.get().uploadsEnabled && !updated.uploadExcluded) await descript.reconcile()
-    }
     broadcast()
   })
   ipcMain.handle('sessions:setPrimarySource', async (_event, sessionId: string, sourceLabel: string) => {
@@ -295,12 +260,6 @@ function registerIpc(): void {
     ledger.setPrimarySource(sessionId, sourceLabel)
     ledger.addActivity('info', `Selected ${sourceLabel} as the primary source for ${session.descriptProjectName}.`)
     const updated = ledger.getSession(sessionId)!
-    const included = updated.files.filter((file) => file.uploadStatus !== 'excluded')
-    if (updated.recorderType === 'vmix' && updated.status === 'needs_review' && updated.syncMode !== 'unknown' &&
-      included.length <= 14 && included.every((file) => file.stabilityStatus === 'stable')) {
-      ledger.updateSession(sessionId, { status: 'ready', errorMessage: null })
-      if (settings.get().uploadsEnabled && !updated.uploadExcluded) await descript.reconcile()
-    }
     broadcast()
   })
   ipcMain.handle('updates:check', () => checkForUpdates())
@@ -314,19 +273,8 @@ function registerIpc(): void {
 }
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
-app.on('before-quit', () => { vmix?.stop(); watcher?.stop(); ledger?.close() })
+app.on('before-quit', () => { watcher?.stop(); ledger?.close() })
 
 async function validateRecorderSettings(input: SettingsInput): Promise<void> {
-  if (input.recorderType !== 'obs' && input.recorderType !== 'vmix') throw new Error('Choose OBS or vMix.')
-  if (input.recorderType === 'vmix') {
-    if (!input.reconciliationDirectory) throw new Error('Choose the reconciliation folder where vMix writes MultiCorder XML manifests.')
-    const stats = await fs.stat(input.reconciliationDirectory)
-    if (!stats.isDirectory()) throw new Error(`${input.reconciliationDirectory} is not a directory.`)
-    await fs.readdir(input.reconciliationDirectory)
-    for (const root of input.vmixRecordingRoots) {
-      const rootStats = await fs.stat(root)
-      if (!rootStats.isDirectory()) throw new Error(`${root} is not a directory.`)
-      await fs.readdir(root)
-    }
-  }
+  if (input.recorderType !== 'obs') throw new Error('Choose OBS Studio.')
 }

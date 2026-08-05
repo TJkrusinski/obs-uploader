@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,18 +9,18 @@ let directory
 before(async () => { directory = await mkdtemp(join(tmpdir(), 'obs-upload-service-')) })
 after(async () => { if (directory) await rm(directory, { recursive: true, force: true }) })
 
-function makeSession(path, stats, recorderType = 'obs') {
+function makeSession(path, stats) {
   return {
-    id: 'session', recorderType, status: 'ready', uploadExcluded: false, descriptProjectName: 'Example', descriptFolderPath: 'Recordings',
-    descriptProjectId: null, descriptJobId: null, descriptProjectUrl: null, syncMode: recorderType === 'vmix' ? 'manifest' : 'unknown',
-    timelineTimebase: recorderType === 'vmix' ? 30 : null, timelineNtsc: recorderType === 'vmix' ? false : null,
+    id: 'session', recorderType: 'obs', status: 'ready', uploadExcluded: false, descriptProjectName: 'Example', descriptFolderPath: 'Recordings',
+    descriptProjectId: null, descriptJobId: null, descriptProjectUrl: null, syncMode: 'unknown',
+    timelineTimebase: null, timelineNtsc: null,
     manifestPath: null, manifestHash: null, importAttemptId: null, importPayloadHash: null,
     files: [{
       id: 'file', locationId: 'program', sourceLabel: 'Program', sourceRole: 'primary', localPath: path,
       originalFilename: 'Program.mp4', descriptMediaKey: 'Program.mp4', contentType: 'video/mp4', fileSize: stats.size,
-      modifiedAt: stats.mtime.toISOString(), segmentIndex: 0, manifestTrackIndex: recorderType === 'vmix' ? 0 : null,
-      manifestClipIndex: recorderType === 'vmix' ? 0 : null, manifestClipId: null, timelineStartFrame: recorderType === 'vmix' ? 0 : null,
-      timelineEndFrame: recorderType === 'vmix' ? 30 : null, stabilityStatus: 'stable', uploadStatus: 'pending', errorMessage: null
+      modifiedAt: stats.mtime.toISOString(), segmentIndex: 0, manifestTrackIndex: null,
+      manifestClipIndex: null, manifestClipId: null, timelineStartFrame: null,
+      timelineEndFrame: null, stabilityStatus: 'stable', uploadStatus: 'pending', errorMessage: null
     }]
   }
 }
@@ -169,27 +168,6 @@ test('aborts when a source changes after the job is created but before PUT', asy
   }
   assert.equal(session.status, 'needs_review')
   assert.equal(session.files[0].uploadStatus, 'failed')
-})
-
-test('invalidates a vMix session when the manifest hash changes before upload', async () => {
-  const path = join(directory, 'Manifest-source.mp4')
-  const manifestPath = join(directory, 'timeline.xml')
-  await writeFile(path, 'video')
-  await writeFile(manifestPath, '<xmeml>first</xmeml>')
-  const session = makeSession(path, await stat(path), 'vmix')
-  session.manifestPath = manifestPath
-  session.manifestHash = createHash('sha256').update('<xmeml>first</xmeml>').digest('hex')
-  await writeFile(manifestPath, '<xmeml>changed</xmeml>')
-  const ledger = new FakeLedger(session)
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => { throw new Error('No import request should be created for a changed manifest.') }
-  try {
-    await new DescriptService(settings, ledger).upload(session)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-  assert.equal(session.status, 'needs_review')
-  assert.match(session.errorMessage, /manifest changed/)
 })
 
 test('does not complete a job that omitted the Recording composition', async () => {

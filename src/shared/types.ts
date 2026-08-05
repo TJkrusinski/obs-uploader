@@ -1,5 +1,5 @@
 export type RecordingDateFormat = 'yy-MM-dd' | 'M.d.yy' | 'MM.dd.yy'
-export type RecorderType = 'obs' | 'vmix'
+export type RecorderType = 'obs' | 'legacy'
 export type CaptureSessionStatus =
   | 'recording'
   | 'connection_lost'
@@ -14,7 +14,7 @@ export type CaptureSessionStatus =
 export type SessionFileRole = 'primary' | 'iso'
 export type SessionFileUploadStatus = 'pending' | 'uploading' | 'transferred' | 'uploaded' | 'failed' | 'excluded' | 'missing'
 export type SessionFileStabilityStatus = 'pending' | 'probing' | 'stable' | 'unsupported' | 'missing'
-export type VmixSyncMode = 'manifest' | 'assumed_zero' | 'unknown'
+export type SessionSyncMode = 'manifest' | 'assumed_zero' | 'unknown'
 
 export interface AppSettings {
   uploadsEnabled: boolean
@@ -23,13 +23,9 @@ export interface AppSettings {
   recordingDateFormat: RecordingDateFormat
   recordingsDirectory: string | null
   reconciliationDirectory: string | null
-  vmixRecordingRoots: string[]
   obsHost: string
   obsPort: number
   recorderType: RecorderType
-  vmixHost: string
-  vmixPort: number
-  vmixUseApi: boolean
 }
 
 export interface SessionFile {
@@ -63,7 +59,7 @@ export interface CaptureSession {
   status: CaptureSessionStatus
   sessionStart: string
   sessionEnd: string | null
-  finalizationSource: 'obs_event' | 'vmix_api' | 'filesystem' | 'manual' | null
+  finalizationSource: 'obs_event' | 'filesystem' | 'manual' | null
   descriptFolderPath: string
   descriptProjectName: string
   descriptProjectId: string | null
@@ -71,7 +67,7 @@ export interface CaptureSession {
   descriptProjectUrl: string | null
   timelineTimebase: number | null
   timelineNtsc: boolean | null
-  syncMode: VmixSyncMode
+  syncMode: SessionSyncMode
   manifestPath: string | null
   manifestHash: string | null
   importAttemptId: string | null
@@ -94,15 +90,8 @@ export interface ActivityItem {
 
 export interface ConnectionState {
   obs: 'connected' | 'disconnected' | 'connecting'
-  vmix: 'connected' | 'disconnected' | 'connecting'
   descript: 'connected' | 'disconnected' | 'checking' | 'rejected'
   watcher: 'watching' | 'stopped'
-}
-
-export interface VmixState {
-  recording: boolean
-  multiCorder: boolean
-  lastSuccessfulPoll: string | null
 }
 
 export interface UpdateState {
@@ -118,7 +107,6 @@ export interface AppSnapshot {
   settings: AppSettings
   hasDescriptToken: boolean
   connections: ConnectionState
-  vmix: VmixState
   sessions: CaptureSession[]
   activity: ActivityItem[]
   activeRecording: string | null
@@ -136,7 +124,6 @@ export interface DesktopApi {
   chooseReconciliationDirectory: () => Promise<string | null>
   testDescript: (token?: string) => Promise<{ ok: boolean; message: string }>
   connectObs: (input: { host: string; port: number; password?: string }) => Promise<{ ok: boolean; message: string; recordingDirectory?: string }>
-  connectVmix: (input: { host: string; port: number }) => Promise<{ ok: boolean; message: string; recording: boolean; multiCorder: boolean }>
   chooseRecordingDirectory: () => Promise<string | null>
   startMonitoring: () => Promise<void>
   stopMonitoring: () => Promise<void>
@@ -148,8 +135,6 @@ export interface DesktopApi {
   deleteSession: (id: string) => Promise<void>
   setSessionHidden: (id: string, hidden: boolean) => Promise<void>
   setSessionUploadExcluded: (id: string, excluded: boolean) => Promise<void>
-  finalizeSession: (id: string) => Promise<void>
-  assumeVmixZero: (id: string) => Promise<void>
   recheckSession: (id: string) => Promise<void>
   setSessionFileExcluded: (sessionId: string, fileId: string, excluded: boolean) => Promise<void>
   setPrimarySource: (sessionId: string, sourceLabel: string) => Promise<void>
