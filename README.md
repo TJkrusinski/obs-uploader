@@ -36,7 +36,7 @@ it cannot be viewed or edited in the browser.
   "softron": {
     "baseUrl": "http://192.168.1.20:8080",
     "password": null,
-    "primarySourceId": "stable-program-source-id",
+    "primarySourceId": null,
     "enabledSourceIds": ["stable-program-source-id", "camera-2", "camera-3", "camera-4"],
     "destinationMappings": { "movie-destination-id": "/Volumes/Studio Recordings" }
   },
@@ -51,9 +51,14 @@ it cannot be viewed or edited in the browser.
 ```
 
 Start in standby, test both services in the dashboard, select one to eight stable
-source IDs, select the Program source, and map any MovieRecorder destination that
-is not directly readable on this Mac. Entering watching mode is refused while a
-selected source has an unresolved destination.
+source IDs, and map any MovieRecorder destination that is not directly readable
+on this Mac. Entering watching mode is refused while a selected source has an
+unresolved destination.
+
+Channel 1 (the first selected source in MovieRecorder's API order) is always the
+Program source. Discovered files are naturally sorted by filename and paired
+one-to-one with channels 1 through N; channel 2 onward become ascending ISO
+tracks. A file/channel count mismatch is retained for review.
 
 ## Persistence and recovery
 

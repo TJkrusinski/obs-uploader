@@ -1,5 +1,5 @@
 import { access, stat } from 'node:fs/promises'
-import { basename, extname, join } from 'node:path'
+import { basename, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { AppConfig, DestinationSnapshot, RecordingFile, RecordingRecord, SessionConfigSnapshot, SoftronSource, SourceSnapshot } from '../shared/types.js'
 import { ConfigStore } from './config.js'
@@ -10,14 +10,8 @@ import { type MovieRecorderSnapshot, resolveDestinations } from './softron.js'
 import { dayEligibility, deterministicProjectName, localDateKey, parseApiDate, recordingFolderDate } from './time.js'
 
 const COALESCE_MS = 10_000
-export function normalizeSoftronName(value: string): string { return value.normalize('NFKD').replace(/[^a-z0-9]+/gi, '').toLowerCase() }
-
-export function matchSoftronSource(filename: string, sources: SourceSnapshot[]): SourceSnapshot | null {
-  const stem = normalizeSoftronName(filename.slice(0, filename.length - extname(filename).length))
-  const exact = sources.filter((source) => source.recordingPaths.some((path) => normalizeSoftronName(basename(path).replace(extname(path), '')) === stem))
-  if (exact.length === 1) return exact[0]
-  const matches = sources.filter((source) => [source.recordingName, source.displayName, source.deviceName].map(normalizeSoftronName).filter((value) => value.length >= 3).some((value) => stem.includes(value)))
-  return matches.length === 1 ? matches[0] : null
+export function compareChannelFiles(left: string, right: string): number {
+  return basename(left).localeCompare(basename(right), undefined, { numeric: true, sensitivity: 'base' }) || left.localeCompare(right)
 }
 
 const sourceSnapshot = (source: SoftronSource): SourceSnapshot => ({
@@ -27,9 +21,9 @@ const sourceSnapshot = (source: SoftronSource): SourceSnapshot => ({
   startedAt: parseApiDate(source.recordingStartDate)?.toISOString() ?? null, stoppedAt: parseApiDate(source.recordingEndDate)?.toISOString() ?? null
 })
 
-function snapshotConfig(config: AppConfig): SessionConfigSnapshot {
+function snapshotConfig(config: AppConfig, primarySourceId = config.softron.primarySourceId): SessionConfigSnapshot {
   return {
-    softronBaseUrl: config.softron.baseUrl, primarySourceId: config.softron.primarySourceId, enabledSourceIds: config.softron.enabledSourceIds,
+    softronBaseUrl: config.softron.baseUrl, primarySourceId, enabledSourceIds: config.softron.enabledSourceIds,
     destinationMappings: config.softron.destinationMappings, descriptDestinationRoot: config.descript.destinationRoot,
     recordingTimezone: config.descript.recordingTimezone, recordingDateFormat: config.descript.recordingDateFormat, ffprobePath: config.tools.ffprobePath
   }
@@ -66,7 +60,7 @@ export class RecordingCoordinator {
     let active = this.ledger.active()
     if (!active && recording.length) active = await this.begin(snapshot, recording)
     if (!active) { this.changed(); return }
-    if (['recording', 'connection_lost'].includes(active.status)) active = await this.reconcileMembership(active, recording)
+    if (['recording', 'connection_lost'].includes(active.status)) active = await this.reconcileMembership(active, selected)
     const participantIds = new Set(active.sources.map((source) => source.uniqueId))
     const stillRecording = recording.some((source) => participantIds.has(source.uniqueId))
     if (stillRecording) {
@@ -79,14 +73,15 @@ export class RecordingCoordinator {
 
   private async begin(snapshot: MovieRecorderSnapshot, sources: SoftronSource[]): Promise<RecordingRecord> {
     const config = this.config.get(); const destinations = await this.assertDestinations(snapshot)
+    const primarySourceId = this.selected(snapshot.sources)[0]?.uniqueId ?? sources[0]?.uniqueId ?? null
     const dates = sources.map((source) => parseApiDate(source.recordingStartDate)).filter((date): date is Date => Boolean(date))
     const started = dates.length ? new Date(Math.min(...dates.map((date) => date.getTime()))) : new Date()
     const eligibilityDate = localDateKey(started, config.descript.recordingTimezone)
     const destinationFolder = [config.descript.destinationRoot, recordingFolderDate(started, config.descript.recordingTimezone, config.descript.recordingDateFormat)].filter(Boolean).join('/')
     const record = await this.ledger.create({
       recorderIdentity: snapshot.identity, status: 'recording', eligibilityDate, eligibilityTimezone: config.descript.recordingTimezone,
-      sessionStart: started.toISOString(), sessionEnd: null, primarySourceId: config.softron.primarySourceId,
-      sources: sources.map(sourceSnapshot), destinations, directoryBaselines: {}, configSnapshot: snapshotConfig(config),
+      sessionStart: started.toISOString(), sessionEnd: null, primarySourceId,
+      sources: sources.map(sourceSnapshot), destinations, directoryBaselines: {}, configSnapshot: snapshotConfig(config, primarySourceId),
       descriptFolder: destinationFolder, descriptProjectName: deterministicProjectName(started, config.descript.recordingTimezone, sources[0]?.recordingName)
     })
     await this.ledger.addActivity('info', `Gang recording started with ${sources.length} source${sources.length === 1 ? '' : 's'}.`, record.id)
@@ -96,17 +91,20 @@ export class RecordingCoordinator {
     this.changed(); return this.ledger.find(record.id)!
   }
 
-  private async reconcileMembership(record: RecordingRecord, recording: SoftronSource[]): Promise<RecordingRecord> {
+  private async reconcileMembership(record: RecordingRecord, selected: SoftronSource[]): Promise<RecordingRecord> {
     const participants = new Map(record.sources.map((source) => [source.uniqueId, source])); let ambiguous: string | null = null
     const sessionStart = Date.parse(record.sessionStart ?? record.createdAt)
-    for (const source of recording) {
+    for (const source of selected) {
       const current = participants.get(source.uniqueId)
       if (current) { participants.set(source.uniqueId, sourceSnapshot(source)); continue }
+      if (!source.isRecording) continue
       const start = parseApiDate(source.recordingStartDate)?.getTime()
       if (participants.size >= 8 || start == null || Math.abs(start - sessionStart) > COALESCE_MS) ambiguous = `${source.displayName} started outside the gang coalescing window.`
       else participants.set(source.uniqueId, sourceSnapshot(source))
     }
-    const updated = await this.ledger.update(record.id, { sources: [...participants.values()] })
+    const selectedOrder = new Map(selected.map((source, index) => [source.uniqueId, index]))
+    const ordered = [...participants.values()].sort((left, right) => (selectedOrder.get(left.uniqueId) ?? Number.MAX_SAFE_INTEGER) - (selectedOrder.get(right.uniqueId) ?? Number.MAX_SAFE_INTEGER))
+    const updated = await this.ledger.update(record.id, { sources: ordered })
     if (ambiguous) return this.ledger.transition(record.id, 'needs_review', ambiguous, 'ambiguous_late_start')
     return updated
   }
@@ -119,6 +117,13 @@ export class RecordingCoordinator {
       if (record.status === 'needs_review' && record.reasonCode === 'ambiguous_late_start') return
       await this.ledger.transition(recordId, 'finalizing')
       record = this.ledger.find(recordId)!
+      const resolvedPrimarySourceId = record.sources[0]?.uniqueId ?? null
+      if (resolvedPrimarySourceId !== record.primarySourceId) {
+        record = await this.ledger.update(recordId, {
+          primarySourceId: resolvedPrimarySourceId,
+          configSnapshot: { ...record.configSnapshot, primarySourceId: resolvedPrimarySourceId }
+        })
+      }
       const candidatePaths = new Set<string>()
       const destinationById = new Map(record.destinations.map((destination) => [destination.uniqueId, destination]))
       for (const source of record.sources) for (const remotePath of source.recordingPaths) {
@@ -132,42 +137,43 @@ export class RecordingCoordinator {
         const current = await snapshotDirectory(destination.localPath!)
         changedPaths(record.directoryBaselines[destination.uniqueId] ?? {}, current).forEach((path) => candidatePaths.add(path))
       }
-      const eligible: Array<{ path: string; source: SourceSnapshot | null; metadata: Awaited<ReturnType<typeof stat>> }> = []
+      const orderedPaths = [...candidatePaths].sort(compareChannelFiles)
+      const eligible: Array<{ path: string; source: SourceSnapshot; channel: number; metadata: Awaited<ReturnType<typeof stat>> }> = []
       let dateError: string | null = null
-      for (const path of candidatePaths) {
+      for (const [index, path] of orderedPaths.entries()) {
         if (this.ledger.findByFilePath(path) && !record.files.some((file) => file.localPath === path)) continue
-        const metadata = await stat(path); const source = matchSoftronSource(basename(path), record.sources)
-        const recordingDate = source ? parseApiDate(source.recordingStartDate) : metadata.birthtimeMs > 0 ? metadata.birthtime : null
+        const metadata = await stat(path); const source = record.sources[index]
+        if (!source) { dateError = `Found more files than MovieRecorder channels (${orderedPaths.length} files for ${record.sources.length} channels).`; continue }
+        const recordingDate = parseApiDate(source.recordingStartDate) ?? (metadata.birthtimeMs > 0 ? metadata.birthtime : null)
         const eligibility = dayEligibility(recordingDate, new Date(), record.eligibilityTimezone)
         const fixedLiveDay = record.eligibilityDate === localDateKey(new Date(record.sessionStart ?? record.createdAt), record.eligibilityTimezone)
         if (eligibility === 'after_today') dateError = `${basename(path)} is dated after the next local-day boundary.`
         else if (eligibility === 'unknown') dateError = `${basename(path)} has no trustworthy recording or creation date.`
-        else if (eligibility === 'today' || fixedLiveDay) eligible.push({ path, source, metadata })
+        else if (eligibility === 'today' || fixedLiveDay) eligible.push({ path, source, channel: index + 1, metadata })
       }
-      if (!eligible.length || dateError) {
-        await this.ledger.transition(recordId, 'needs_review', dateError ?? 'No eligible current-day media files were found.', dateError ? 'invalid_recording_date' : 'no_media')
+      if (!eligible.length || dateError || eligible.length !== record.sources.length) {
+        const countError = eligible.length !== record.sources.length ? `Expected one file for each of ${record.sources.length} channels, but found ${eligible.length}.` : null
+        await this.ledger.transition(recordId, 'needs_review', dateError ?? countError ?? 'No eligible current-day media files were found.', dateError ? 'invalid_recording_date' : eligible.length ? 'channel_file_count_mismatch' : 'no_media')
         return
       }
       await this.ledger.transition(recordId, 'validating')
-      const primaryId = record.primarySourceId
-      const grouped = new Map<string, number>()
-      const results = await Promise.all(eligible.map(async ({ path, source, metadata }, index): Promise<RecordingFile> => {
+      const primaryId = resolvedPrimarySourceId
+      const results = await Promise.all(eligible.map(async ({ path, source, channel, metadata }): Promise<RecordingFile> => {
         const fingerprint = await stableFingerprint(path)
         const validation = await validateMediaFile(path, record!.configSnapshot.ffprobePath, fingerprint)
-        const group = source?.uniqueId ?? `unmatched-${index}`; const segmentIndex = grouped.get(group) ?? 0; grouped.set(group, segmentIndex + 1)
-        const sourceStart = source ? parseApiDate(source.recordingStartDate)?.getTime() : null
+        const sourceStart = parseApiDate(source.recordingStartDate)?.getTime()
         const start = sourceStart ?? Number(metadata.birthtimeMs)
         const timelineOffsetSeconds = Math.max(0, (start - Date.parse(record!.sessionStart ?? record!.createdAt)) / 1000)
+        const sourceLabel = `Channel ${channel}${source.displayName ? ` — ${source.displayName}` : ''}`
         return {
-          id: randomUUID(), sourceId: source?.uniqueId ?? null, sourceLabel: source?.displayName ?? basename(path), role: source?.uniqueId === primaryId ? 'primary' : 'iso',
-          localPath: path, originalFilename: basename(path), mediaKey: `${source?.displayName ?? 'Unmatched'} — ${basename(path)}`,
-          contentType: contentType(path), segmentIndex, timelineOffsetSeconds, fingerprint,
+          id: randomUUID(), sourceId: source.uniqueId, sourceLabel, role: source.uniqueId === primaryId ? 'primary' : 'iso',
+          localPath: path, originalFilename: basename(path), mediaKey: `${sourceLabel} — ${basename(path)}`,
+          contentType: contentType(path), segmentIndex: 0, timelineOffsetSeconds, fingerprint,
           stability: 'stable', validation, uploadStatus: 'pending', error: validation.error
         }
       }))
       const problems = [
         ...results.filter((file) => !file.validation?.ok).map((file) => `${file.originalFilename}: ${file.validation?.error}`),
-        ...results.filter((file) => !file.sourceId).map((file) => `${file.originalFilename} could not be associated with a source.`),
         ...(!results.some((file) => file.role === 'primary') ? ['No primary source was identified.'] : [])
       ]
       const endDates = record.sources.map((source) => parseApiDate(source.recordingEndDate)).filter((date): date is Date => Boolean(date))
@@ -208,9 +214,4 @@ export class RecordingCoordinator {
     this.changed()
   }
 
-  async setPrimary(recordId: string, sourceId: string): Promise<void> {
-    const record = this.ledger.find(recordId); if (!record || !record.sources.some((source) => source.uniqueId === sourceId)) throw new Error('Selected source does not belong to this recording.')
-    const files = record.files.map((file) => ({ ...file, role: file.sourceId === sourceId ? 'primary' as const : 'iso' as const }))
-    await this.ledger.update(recordId, { primarySourceId: sourceId, files, status: 'needs_review', error: 'Primary source updated. Retry to validate and reconcile.', reasonCode: 'primary_updated' }); this.changed()
-  }
 }

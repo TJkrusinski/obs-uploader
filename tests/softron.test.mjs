@@ -4,14 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { ConfigStore } from '../dist-server/main/config.js'
-import { RecordingCoordinator, matchSoftronSource, normalizeSoftronName } from '../dist-server/main/coordinator.js'
+import { RecordingCoordinator, compareChannelFiles } from '../dist-server/main/coordinator.js'
 import { RecordLedger } from '../dist-server/main/ledger.js'
 import { sourceFromApi } from '../dist-server/main/softron.js'
 import { dayEligibility, localDateKey } from '../dist-server/main/time.js'
-
-test('normalizes the live MovieRecorder naming punctuation', () => {
-  assert.equal(normalizeSoftronName('8_5_2026 1_20_20 PM Cam 2.mp4'), '85202612020pmcam2mp4')
-})
 
 test('parses destination IDs and exact recording paths from a source response', () => {
   const source = sourceFromApi({
@@ -26,13 +22,9 @@ test('parses destination IDs and exact recording paths from a source response', 
   assert.deepEqual(source?.recordingPaths, ['/Users/studio/Movies/8_5_2026 1_20_20 PM Program.mp4'])
 })
 
-test('associates a completed filename with its recording name', () => {
-  const sources = [{
-    uniqueId: 'program', displayName: 'DeckLink Quad (1)', deviceName: 'DeckLink Quad 2 (1)',
-    recordingName: '8/5/2026 1:20:20 PM Program', recordingStartDate: '2026-08-05T20:20:20.891Z',
-    recordingEndDate: '', enabledDestinationIds: ['destination-1'], recordingPaths: []
-  }]
-  assert.equal(matchSoftronSource('8_5_2026 1_20_20 PM Program.mp4', sources)?.uniqueId, 'program')
+test('sorts channel files naturally instead of guessing from source names', () => {
+  const files = ['/recordings/Channel 10.mov', '/recordings/Channel 2.mov', '/recordings/Channel 1.mov']
+  assert.deepEqual(files.sort(compareChannelFiles), ['/recordings/Channel 1.mov', '/recordings/Channel 2.mov', '/recordings/Channel 10.mov'])
 })
 
 test('uses local calendar dates across a daylight-saving boundary', () => {
@@ -49,7 +41,7 @@ test('coalesces four and eight sources and waits for the final participant to st
       const config = await ConfigStore.open(directory); const value = config.get(); const ids = Array.from({ length: count }, (_, index) => `source-${index}`)
       await config.updateEditable({
         desiredMode: 'standby', server: { port: value.server.port, openBrowser: false },
-        softron: { baseUrl: value.softron.baseUrl, primarySourceId: ids[0], enabledSourceIds: ids, destinationMappings: { destination: directory } },
+        softron: { baseUrl: value.softron.baseUrl, primarySourceId: null, enabledSourceIds: ids, destinationMappings: { destination: directory } },
         descript: { destinationRoot: 'Studio', recordingTimezone: 'America/Los_Angeles', recordingDateFormat: 'yy-MM-dd' }, tools: { ffprobePath: 'ffprobe' }
       })
       const { ledger } = await RecordLedger.open(directory); const descript = { upload: async () => undefined, reconcile: async () => 'missing' }
@@ -63,6 +55,7 @@ test('coalesces four and eight sources and waits for the final participant to st
       const base = { identity: 'MovieRecorder Express', destinations: [{ uniqueId: 'destination', name: 'Records', path: directory }], at: new Date().toISOString() }
       await coordinator.onSnapshot({ ...base, sources })
       assert.equal(ledger.records().length, 1); assert.equal(ledger.records()[0].sources.length, count); assert.equal(ledger.records()[0].status, 'recording')
+      assert.equal(ledger.records()[0].primarySourceId, ids[0]); assert.equal(ledger.records()[0].configSnapshot.primarySourceId, ids[0])
       await coordinator.onSnapshot({ ...base, sources: sources.map((source, index) => ({ ...source, isRecording: index === count - 1 })) })
       assert.equal(ledger.records()[0].status, 'recording')
       await coordinator.connectionLost(); assert.equal(ledger.records()[0].status, 'connection_lost')

@@ -9,7 +9,11 @@ const file = (name, role = 'iso', offset = 0) => ({
   validation: { checkedAt: new Date().toISOString(), ok: true, ffprobeVersion: 'ffprobe', durationSeconds: 10, streams: [{ index: 0, codecType: 'video', codecName: 'h264' }], formatName: 'mov', error: null },
   uploadStatus: 'pending', error: null
 })
-const record = (files) => ({ descriptProjectName: 'Gang', descriptFolder: 'Studio/26-08-07', files })
+const record = (files) => ({
+  descriptProjectName: 'Gang', descriptFolder: 'Studio/26-08-07', files,
+  sources: [...files].sort((left, right) => left.role === 'primary' ? -1 : right.role === 'primary' ? 1 : left.mediaKey.localeCompare(right.mediaKey))
+    .map((item) => ({ uniqueId: item.sourceId }))
+})
 
 test('builds one synchronized Recording composition with Program ordered first', () => {
   const body = buildDescriptImportBody(record([file('Camera.mp4', 'iso', 1.25), file('Program.mp4', 'primary', 0)]))

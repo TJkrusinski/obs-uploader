@@ -37,6 +37,7 @@ export function App() {
 
   if (!state || !form) return <main className="loading">Loading Movie Recorder Upload…</main>
   const active = state.records.find((record) => ['recording', 'connection_lost', 'finalizing', 'validating', 'reconciling', 'uploading', 'processing'].includes(record.status))
+  const selectedSources = state.softron.sources.filter((source) => !state.config.softron.enabledSourceIds.length || state.config.softron.enabledSourceIds.includes(source.uniqueId))
   const counts = state.records.reduce<Record<string, number>>((result, record) => ({ ...result, [record.status]: (result[record.status] ?? 0) + 1 }), {})
 
   return <div className="app-shell"><main className="content">
@@ -54,9 +55,9 @@ export function App() {
       <Health title="Descript" status={state.health.descript} detail={state.config.secrets.descriptApiKey.configured ? 'Key configured in config.json' : 'Add API key to config.json'} action="Verify key" onAction={() => void mutate('/api/test/descript')}/>
     </section>
 
-    <section className="source-panel panel"><div className="panel-heading"><div><h2>MovieRecorder sources</h2><p>Stable IDs determine gang membership and the Program track.</p></div><span className="count-chip">{state.softron.sources.length} discovered</span></div>
-      <div className="source-grid">{state.softron.sources.length ? state.softron.sources.map((source) => <div className={`source-card ${source.isRecording ? 'live' : ''}`} key={source.uniqueId}>
-        <div><strong>{source.displayName}</strong><code>{source.uniqueId}</code></div><span className={`status-badge ${source.isRecording ? 'recording' : 'completed'}`}>{source.isRecording ? 'Recording' : 'Idle'}</span>
+    <section className="source-panel panel"><div className="panel-heading"><div><h2>MovieRecorder channels</h2><p>Selected sources retain API order; channel 1 is Program.</p></div><span className="count-chip">{selectedSources.length} selected</span></div>
+      <div className="source-grid">{selectedSources.length ? selectedSources.map((source, index) => <div className={`source-card ${source.isRecording ? 'live' : ''}`} key={source.uniqueId}>
+        <div><strong>Channel {index + 1} · {source.displayName}</strong><code>{source.uniqueId}</code></div><span className={`status-badge ${source.isRecording ? 'recording' : 'completed'}`}>{source.isRecording ? 'Recording' : index === 0 ? 'Program' : 'ISO'}</span>
         <small>{source.recordingName || 'No recording name'} · {source.enabledDestinationIds.length} destination(s)</small>
       </div>) : <div className="empty-state">Test MovieRecorder to discover sources.</div>}</div>
     </section>
@@ -73,7 +74,7 @@ export function App() {
         <SettingsCard title="MovieRecorder" description="Connection, stable source selection, and mounted destination paths.">
           <label>Base URL<input value={form.softron.baseUrl} onChange={(event) => setForm({ ...form, softron: { ...form.softron, baseUrl: event.target.value } })}/></label>
           <label>Enabled source IDs<textarea value={form.softron.enabledSourceIds.join('\n')} onChange={(event) => setForm({ ...form, softron: { ...form.softron, enabledSourceIds: lines(event.target.value) } })}/></label>
-          <label>Primary source<select value={form.softron.primarySourceId ?? ''} onChange={(event) => setForm({ ...form, softron: { ...form.softron, primarySourceId: event.target.value || null } })}><option value="">Select Program source</option>{state.softron.sources.map((source) => <option value={source.uniqueId} key={source.uniqueId}>{source.displayName}</option>)}</select></label>
+          <p className="field-help">Channel 1 is always Program. Channels 2 through N are ISO tracks in ascending order.</p>
           <label>Destination mappings <small>One “destination-id=/local/path” per line</small><textarea value={mappingText(form.softron.destinationMappings)} onChange={(event) => setForm({ ...form, softron: { ...form.softron, destinationMappings: mappings(event.target.value) } })}/></label>
         </SettingsCard>
         <SettingsCard title="Descript & validation" description="Naming uses the configured local calendar—not UTC.">
@@ -104,8 +105,7 @@ function RecordRow({ record, expanded, toggle, busy, mutate }: { record: Recordi
   return <div className="session-block"><button className="recording-row" onClick={toggle}><span className="disclosure">{expanded ? '−' : '+'}</span><div className="recording-name"><strong>{record.descriptProjectName}</strong><span>{when(record.sessionStart)} · {record.files.length} file(s)</span></div><div className="recording-destination"><strong>{record.descriptFolder}</strong><span>{record.eligibilityDate ?? 'Unknown day'}</span></div><span className={`status-badge ${record.status}`}>{label(record.status)}</span></button>
     {expanded && <div className="session-details">{record.error && <p className="session-error">{record.error}</p>}<div className="session-sync-summary"><span>Timezone {record.eligibilityTimezone}</span><span>Retries {record.retryCount}</span><span>ID {record.id}</span></div>
       <div className="session-files">{record.files.map((file) => <div className="session-file" key={file.id}><div><strong>{file.sourceLabel} · {file.role === 'primary' ? 'Program' : 'ISO'}</strong><small>{file.originalFilename}</small></div><div className="file-states"><span>{file.stability}</span><span>{file.validation?.ok ? 'valid' : file.validation ? 'invalid' : 'not probed'}</span><span>{file.uploadStatus}</span></div></div>)}</div>
-      <div className="session-detail-actions"><select value={record.primarySourceId ?? ''} onChange={(event) => event.target.value && void mutate(`/api/records/${record.id}/primary`, { sourceId: event.target.value })}><option value="">Choose primary</option>{record.sources.map((source) => <option value={source.uniqueId} key={source.uniqueId}>{source.displayName}</option>)}</select>
-        <button className="button" disabled={busy || record.status === 'completed'} onClick={() => void mutate(`/api/records/${record.id}/retry`)}>Retry / reconcile</button>
+      <div className="session-detail-actions"><button className="button" disabled={busy || record.status === 'completed'} onClick={() => void mutate(`/api/records/${record.id}/retry`)}>Retry / reconcile</button>
         {record.status === 'skipped' ? <button className="button" disabled={busy} onClick={() => void mutate(`/api/records/${record.id}/restore`)}>Restore to review</button> : <button className="button danger" disabled={busy || record.status === 'completed'} onClick={() => void mutate(`/api/records/${record.id}/skip`)}>Skip</button>}
       </div></div>}
   </div>

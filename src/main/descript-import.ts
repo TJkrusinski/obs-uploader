@@ -11,8 +11,9 @@ export interface DescriptImportBody {
 }
 
 export function buildDescriptImportBody(record: RecordingRecord): DescriptImportBody {
+  const sourceOrder = new Map(record.sources.map((source, index) => [source.uniqueId, index]))
   const files = [...record.files].sort((left, right) => left.role === right.role
-    ? left.timelineOffsetSeconds - right.timelineOffsetSeconds || left.segmentIndex - right.segmentIndex
+    ? (sourceOrder.get(left.sourceId ?? '') ?? Number.MAX_SAFE_INTEGER) - (sourceOrder.get(right.sourceId ?? '') ?? Number.MAX_SAFE_INTEGER) || left.segmentIndex - right.segmentIndex
     : left.role === 'primary' ? -1 : 1)
   if (!files.length) throw new Error('The session has no media.')
   if (!files.some((file) => file.role === 'primary')) throw new Error('The session has no primary source.')

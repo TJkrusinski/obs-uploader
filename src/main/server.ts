@@ -78,13 +78,12 @@ export class AdministrationServer {
       }
       if (method === 'POST' && url.pathname === '/api/test/movierecorder') return responseJson(response, 200, await this.runtime.testMovieRecorder())
       if (method === 'POST' && url.pathname === '/api/test/descript') return responseJson(response, 200, await this.runtime.testDescript())
-      const action = url.pathname.match(/^\/api\/records\/([^/]+)\/(retry|skip|restore|primary)$/)
+      const action = url.pathname.match(/^\/api\/records\/([^/]+)\/(retry|skip|restore)$/)
       if (method === 'POST' && action) {
-        const id = decodeURIComponent(action[1]); const input = await body(request) as { sourceId?: unknown }
+        const id = decodeURIComponent(action[1]); await body(request)
         if (action[2] === 'retry') await this.runtime.coordinator.retry(id)
         else if (action[2] === 'skip') await this.runtime.skip(id)
         else if (action[2] === 'restore') await this.runtime.restore(id)
-        else { if (typeof input.sourceId !== 'string') throw new ApiError(400, 'invalid_source', 'sourceId is required.'); await this.runtime.coordinator.setPrimary(id, input.sourceId) }
         return responseJson(response, 200, this.runtime.ledger.find(id))
       }
       if (url.pathname.startsWith('/api/')) throw new ApiError(404, 'route_not_found', 'API route not found.')
