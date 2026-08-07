@@ -1,45 +1,32 @@
-import type { CaptureSession } from '../shared/types.js'
+import type { RecordingRecord } from '../shared/types.js'
 
-type DirectUploadMedia = { content_type: string; file_size: number }
-
+type UploadMedia = { content_type: string; file_size: number }
+type Multitrack = { tracks: Array<{ media: string; offset: number }> }
 export interface DescriptImportBody {
-  project_name: string
-  folder_name: string
-  team_access: 'edit'
-  add_media: Record<string, DirectUploadMedia>
-  add_compositions: Array<{
-    name: 'Recording'
-    width: 1920
-    height: 1080
-    clips: Array<{ media: string }>
-  }>
+  name: string
+  folder_path: string
+  add_media: Record<string, UploadMedia | Multitrack>
+  add_compositions: Array<{ name: 'Recording'; width: 1920; height: 1080; clips: Array<{ media: string }> }>
 }
 
-export function buildDescriptImportBody(session: CaptureSession): DescriptImportBody {
-  if (session.recorderType !== 'obs') throw new Error('This recording source is no longer supported.')
-  const files = session.files.filter((file) => file.uploadStatus !== 'excluded')
-  if (!files.length) throw new Error('The session has no included media.')
-
-  const mediaKeys = new Set<string>()
+export function buildDescriptImportBody(record: RecordingRecord): DescriptImportBody {
+  const files = [...record.files].sort((left, right) => left.role === right.role
+    ? left.timelineOffsetSeconds - right.timelineOffsetSeconds || left.segmentIndex - right.segmentIndex
+    : left.role === 'primary' ? -1 : 1)
+  if (!files.length) throw new Error('The session has no media.')
+  if (!files.some((file) => file.role === 'primary')) throw new Error('The session has no primary source.')
+  if (files.some((file) => file.fingerprint.size <= 0)) throw new Error('The session contains an invalid file size.')
+  if (files.some((file) => file.stability !== 'stable' || !file.validation?.ok)) throw new Error('Every file must be stable and valid before import.')
+  const keys = new Set<string>()
+  const addMedia: Record<string, UploadMedia | Multitrack> = {}
   for (const file of files) {
-    const key = file.descriptMediaKey.trim().toLowerCase()
-    if (!key || mediaKeys.has(key)) throw new Error(`The session contains a duplicate or empty Descript media key: ${file.descriptMediaKey}`)
-    if (!Number.isSafeInteger(file.fileSize) || file.fileSize <= 0) throw new Error(`${file.descriptMediaKey} has an invalid file size.`)
-    mediaKeys.add(key)
+    if (!file.mediaKey || keys.has(file.mediaKey)) throw new Error(`The session contains a duplicate or empty Descript media key: ${file.mediaKey}`)
+    keys.add(file.mediaKey); addMedia[file.mediaKey] = { content_type: file.contentType, file_size: file.fingerprint.size }
   }
-
-  const compositionClips = files
-    .filter((file) => file.sourceRole === 'primary')
-    .map((file) => ({ media: file.descriptMediaKey }))
-  if (!compositionClips.length) throw new Error('This session has no primary recording.')
-
+  const logicalKey = 'Softron Session'
+  addMedia[logicalKey] = { tracks: files.map((file) => ({ media: file.mediaKey, offset: file.timelineOffsetSeconds })) }
   return {
-    project_name: session.descriptProjectName,
-    folder_name: session.descriptFolderPath,
-    team_access: 'edit',
-    add_media: Object.fromEntries(
-      files.map((file) => [file.descriptMediaKey, { content_type: file.contentType, file_size: file.fileSize }])
-    ),
-    add_compositions: [{ name: 'Recording', width: 1920, height: 1080, clips: compositionClips }]
+    name: record.descriptProjectName, folder_path: record.descriptFolder, add_media: addMedia,
+    add_compositions: [{ name: 'Recording', width: 1920, height: 1080, clips: [{ media: logicalKey }] }]
   }
 }

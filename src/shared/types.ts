@@ -1,151 +1,179 @@
+export type DesiredMode = 'standby' | 'watching'
 export type RecordingDateFormat = 'yy-MM-dd' | 'M.d.yy' | 'MM.dd.yy'
-export type RecorderType = 'obs' | 'legacy'
-export type CaptureSessionStatus =
-  | 'recording'
-  | 'connection_lost'
-  | 'finalizing'
-  | 'needs_review'
-  | 'ready'
-  | 'uploading'
-  | 'processing'
-  | 'completed'
-  | 'failed'
-  | 'canceled'
-export type SessionFileRole = 'primary' | 'iso'
-export type SessionFileUploadStatus = 'pending' | 'uploading' | 'transferred' | 'uploaded' | 'failed' | 'excluded' | 'missing'
-export type SessionFileStabilityStatus = 'pending' | 'probing' | 'stable' | 'unsupported' | 'missing'
-export type SessionSyncMode = 'manifest' | 'assumed_zero' | 'unknown'
+export type ConnectionHealth = 'connecting' | 'connected' | 'degraded' | 'disconnected'
+export type RecordStatus =
+  | 'recording' | 'connection_lost' | 'finalizing' | 'validating' | 'reconciling'
+  | 'uploading' | 'processing' | 'completed' | 'needs_review' | 'failed' | 'skipped'
 
-export interface AppSettings {
-  uploadsEnabled: boolean
+export interface AppConfig {
+  schemaVersion: 1
+  desiredMode: DesiredMode
+  server: { host: '127.0.0.1'; port: number; openBrowser: boolean }
+  softron: {
+    baseUrl: string
+    password: string | null
+    primarySourceId: string | null
+    enabledSourceIds: string[]
+    destinationMappings: Record<string, string>
+  }
+  descript: {
+    apiKey: string | null
+    destinationRoot: string
+    recordingTimezone: string
+    recordingDateFormat: RecordingDateFormat
+  }
+  tools: { ffprobePath: string }
+}
+
+export interface EditableConfig {
+  desiredMode: DesiredMode
+  server: { port: number; openBrowser: boolean }
+  softron: Omit<AppConfig['softron'], 'password'>
+  descript: Omit<AppConfig['descript'], 'apiKey'>
+  tools: AppConfig['tools']
+}
+
+export interface RedactedConfig extends EditableConfig {
+  schemaVersion: 1
+  configPath: string
+  secrets: {
+    descriptApiKey: { configured: boolean; verified: boolean | null; verifiedAt: string | null }
+    softronPassword: { configured: boolean; verified: boolean | null; verifiedAt: string | null }
+  }
+  warnings: string[]
+}
+
+export interface SoftronSource {
+  uniqueId: string
+  displayName: string
+  deviceName: string
+  recordingName: string
+  recordingStartDate: string
+  recordingEndDate: string
+  isRecording: boolean
+  isPaused: boolean
+  isEnabled: boolean
+  enabledDestinationIds: string[]
+  recordingPaths: string[]
+}
+
+export interface SoftronDestination { uniqueId: string; name: string; path: string | null }
+
+export interface DestinationSnapshot extends SoftronDestination {
+  localPath: string | null
+  readable: boolean
+}
+
+export interface SourceSnapshot extends Omit<SoftronSource, 'isRecording' | 'isPaused' | 'isEnabled'> {
+  startedAt: string | null
+  stoppedAt: string | null
+}
+
+export interface FileFingerprint {
+  size: number
+  mtimeMs: number
+  birthtimeMs: number
+  sha256: string
+}
+
+export interface MediaValidation {
+  checkedAt: string
+  ok: boolean
+  ffprobeVersion: string | null
+  durationSeconds: number | null
+  streams: Array<{ index: number; codecType: string; codecName: string | null }>
+  formatName: string | null
+  error: string | null
+}
+
+export interface RecordingFile {
+  id: string
+  sourceId: string | null
+  sourceLabel: string
+  role: 'primary' | 'iso'
+  localPath: string
+  originalFilename: string
+  mediaKey: string
+  contentType: string
+  segmentIndex: number
+  timelineOffsetSeconds: number
+  fingerprint: FileFingerprint
+  stability: 'pending' | 'probing' | 'stable' | 'unstable' | 'missing'
+  validation: MediaValidation | null
+  uploadStatus: 'pending' | 'uploading' | 'transferred' | 'uploaded' | 'failed'
+  error: string | null
+}
+
+export interface SessionConfigSnapshot {
+  softronBaseUrl: string
+  primarySourceId: string | null
+  enabledSourceIds: string[]
+  destinationMappings: Record<string, string>
   descriptDestinationRoot: string
   recordingTimezone: string
   recordingDateFormat: RecordingDateFormat
-  recordingsDirectory: string | null
-  reconciliationDirectory: string | null
-  obsHost: string
-  obsPort: number
-  recorderType: RecorderType
+  ffprobePath: string
 }
 
-export interface SessionFile {
+export interface RecordingRecord {
   id: string
-  sessionId: string
-  locationId: string
-  sourceLabel: string
-  sourceRole: SessionFileRole
-  localPath: string
-  originalFilename: string
-  descriptMediaKey: string
-  contentType: string
-  fileSize: number
-  modifiedAt: string
-  segmentIndex: number
-  manifestTrackIndex: number | null
-  manifestClipIndex: number | null
-  manifestClipId: string | null
-  timelineStartFrame: number | null
-  timelineEndFrame: number | null
-  stabilityStatus: SessionFileStabilityStatus
-  uploadStatus: SessionFileUploadStatus
-  errorMessage: string | null
-  discoveredAt: string
+  createdAt: string
   updatedAt: string
-}
-
-export interface CaptureSession {
-  id: string
-  recorderType: RecorderType
-  status: CaptureSessionStatus
-  sessionStart: string
+  recorderIdentity: string
+  status: RecordStatus
+  reasonCode: string | null
+  error: string | null
+  retryCount: number
+  eligibilityDate: string | null
+  eligibilityTimezone: string
+  sessionStart: string | null
   sessionEnd: string | null
-  finalizationSource: 'obs_event' | 'filesystem' | 'manual' | null
-  descriptFolderPath: string
+  primarySourceId: string | null
+  sources: SourceSnapshot[]
+  destinations: DestinationSnapshot[]
+  directoryBaselines: Record<string, Record<string, { size: number; mtimeMs: number; birthtimeMs: number }>>
+  files: RecordingFile[]
+  configSnapshot: SessionConfigSnapshot
+  descriptFolder: string
   descriptProjectName: string
+  importPayloadHash: string | null
+  importAttemptId: string | null
   descriptProjectId: string | null
   descriptJobId: string | null
   descriptProjectUrl: string | null
-  timelineTimebase: number | null
-  timelineNtsc: boolean | null
-  syncMode: SessionSyncMode
-  manifestPath: string | null
-  manifestHash: string | null
-  importAttemptId: string | null
-  importPayloadHash: string | null
-  configurationSnapshot: string
-  errorMessage: string | null
-  hidden: boolean
-  uploadExcluded: boolean
-  createdAt: string
-  updatedAt: string
-  files: SessionFile[]
 }
 
-export interface ActivityItem {
+export interface ActivityEntry {
   id: string
-  kind: 'info' | 'success' | 'warning' | 'error'
+  at: string
+  level: 'info' | 'success' | 'warning' | 'error'
+  recordId: string | null
   message: string
-  createdAt: string
 }
 
-export interface ConnectionState {
-  obs: 'connected' | 'disconnected' | 'connecting'
-  descript: 'connected' | 'disconnected' | 'checking' | 'rejected'
-  watcher: 'watching' | 'stopped'
-}
+export interface RecordsDocument { schemaVersion: 1; records: RecordingRecord[]; activity: ActivityEntry[] }
 
-export interface UpdateState {
-  status: 'idle' | 'checking' | 'current' | 'available' | 'error'
-  currentVersion: string
-  latestVersion: string | null
-  releaseUrl: string | null
-  checkedAt: string | null
-  message: string | null
+export interface HealthSnapshot {
+  server: 'ok'
+  configuration: 'valid' | 'invalid'
+  movierecorder: ConnectionHealth
+  destinations: 'ready' | 'unresolved' | 'unknown'
+  ffprobe: 'available' | 'unavailable' | 'unknown'
+  descript: 'configured' | 'verified' | 'rejected' | 'missing'
+  watcher: 'standby' | 'starting' | 'watching' | 'degraded' | 'error'
+  recovery: 'pending' | 'running' | 'complete' | 'error'
 }
 
 export interface AppSnapshot {
-  settings: AppSettings
-  hasDescriptToken: boolean
-  connections: ConnectionState
-  sessions: CaptureSession[]
-  activity: ActivityItem[]
-  activeRecording: string | null
-  update: UpdateState
+  version: string
+  startedAt: string
+  mode: DesiredMode
+  health: HealthSnapshot
+  config: RedactedConfig
+  softron: { sources: SoftronSource[]; destinations: DestinationSnapshot[]; lastSuccessfulSnapshot: string | null }
+  records: RecordingRecord[]
+  activity: ActivityEntry[]
+  bootstrapToken: string
 }
 
-export interface SettingsInput extends AppSettings {
-  descriptToken?: string
-  obsPassword?: string
-}
-
-export interface DesktopApi {
-  getSnapshot: () => Promise<AppSnapshot>
-  saveSettings: (settings: SettingsInput) => Promise<AppSettings>
-  chooseReconciliationDirectory: () => Promise<string | null>
-  testDescript: (token?: string) => Promise<{ ok: boolean; message: string }>
-  connectObs: (input: { host: string; port: number; password?: string }) => Promise<{ ok: boolean; message: string; recordingDirectory?: string }>
-  chooseRecordingDirectory: () => Promise<string | null>
-  startMonitoring: () => Promise<void>
-  stopMonitoring: () => Promise<void>
-  reconcile: () => Promise<void>
-  resetToday: () => Promise<number>
-  hideBeforeToday: () => Promise<number>
-  resetSession: (id: string) => Promise<void>
-  cancelSession: (id: string) => Promise<void>
-  deleteSession: (id: string) => Promise<void>
-  setSessionHidden: (id: string, hidden: boolean) => Promise<void>
-  setSessionUploadExcluded: (id: string, excluded: boolean) => Promise<void>
-  recheckSession: (id: string) => Promise<void>
-  setSessionFileExcluded: (sessionId: string, fileId: string, excluded: boolean) => Promise<void>
-  setPrimarySource: (sessionId: string, sourceLabel: string) => Promise<void>
-  checkForUpdates: () => Promise<UpdateState>
-  openUpdatePage: () => Promise<void>
-  openDescriptProject: (url: string) => Promise<void>
-  onStateChanged: (callback: (state: AppSnapshot) => void) => () => void
-}
-
-declare global {
-  interface Window {
-    desktopApi: DesktopApi
-  }
-}
+export interface ApiErrorBody { error: { code: string; message: string } }

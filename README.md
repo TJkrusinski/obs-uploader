@@ -1,43 +1,105 @@
-# OBS Upload
+# Movie Recorder Upload
 
-OBS Upload is a macOS and Windows Electron app that sends completed OBS recordings to Descript.
+Movie Recorder Upload is a macOS command-line application that watches Softron
+MovieRecorder Express gang recordings and creates one synchronized multitrack
+Descript project per session. It serves its administration dashboard on
+`127.0.0.1`; Electron, OBS, SQLite, OS credential stores, and legacy-data
+migration are intentionally not part of this product.
 
-It creates projects in this structure:
+## Run from source
 
-```text
-[optional Descript root/]<YY-MM-DD>/<YYYY-MM-DD_HH-mm-ss>
-```
-
-Each project contains a `Recording` composition and the original OBS media file.
-Projects created inside a Descript folder are shared with Drive members as editors, as required by Descript's folder-import API.
-
-## What you need
-
-1. **OBS Studio 28 or newer** with its built-in WebSocket server enabled.
-2. A **Descript API token**, scoped to the Descript Drive that should contain the new projects. In Descript, open **Settings → API tokens → Create token**, name it, select the Drive, and copy the token immediately. Descript shows the value only once.
-3. Enough **Descript media minutes** for the material you upload. Imports are asynchronous and consume media minutes.
-
-The app stores Descript and OBS secrets in the operating system credential store (Keychain on macOS, Credential Manager on Windows). Its ordinary settings JSON and SQLite ledger do not contain either secret.
-
-## Development
+Requirements: Node.js 24+, `ffprobe` on `PATH` (or an explicit configured path),
+and a Mac that can read each MovieRecorder destination or mounted equivalent.
 
 ```bash
 npm install
-npm run dev
+npm run build
+node dist-server/main/main.js --data-dir .local-data --open
 ```
 
-Build an unpacked app:
+The default URL is `http://127.0.0.1:8503`. The complete CLI is:
+
+```text
+movie-recorder-upload [--data-dir PATH] [--host 127.0.0.1] [--port PORT] [--open]
+```
+
+The application creates `config.json` and `records.json` with mode `0600` in a
+state directory with mode `0700`. Without `--data-dir`, that directory is
+`~/.movie-recorder-upload`. Add the Descript API key directly to `config.json`;
+it cannot be viewed or edited in the browser.
+
+```json
+{
+  "schemaVersion": 1,
+  "desiredMode": "standby",
+  "server": { "host": "127.0.0.1", "port": 8503, "openBrowser": false },
+  "softron": {
+    "baseUrl": "http://192.168.1.20:8080",
+    "password": null,
+    "primarySourceId": "stable-program-source-id",
+    "enabledSourceIds": ["stable-program-source-id", "camera-2", "camera-3", "camera-4"],
+    "destinationMappings": { "movie-destination-id": "/Volumes/Studio Recordings" }
+  },
+  "descript": {
+    "apiKey": "replace-in-config-only",
+    "destinationRoot": "Studio",
+    "recordingTimezone": "America/Los_Angeles",
+    "recordingDateFormat": "yy-MM-dd"
+  },
+  "tools": { "ffprobePath": "ffprobe" }
+}
+```
+
+Start in standby, test both services in the dashboard, select one to eight stable
+source IDs, select the Program source, and map any MovieRecorder destination that
+is not directly readable on this Mac. Entering watching mode is refused while a
+selected source has an unresolved destination.
+
+## Persistence and recovery
+
+Every ledger mutation is serialized, fsynced, atomically renamed, and backed up
+as `records.json.bak`. Sessions snapshot non-secret configuration, stable source
+and destination IDs, file fingerprints, ffprobe results, and Descript import
+identifiers. Recovery uses job/project lookup before any new import. Prior-day
+media remains visible but cannot start or restart an upload.
+
+## Apple Silicon single executable
+
+Build the ad-hoc-signed local SEA with:
 
 ```bash
-npm run build:unpacked
+npm run build:sea
+release/movie-recorder-upload --version
 ```
 
-The packaged app is written to `release/`.
+The build embeds the production server bundle and hashed web assets in an
+Apple-Silicon Node.js SEA at `release/movie-recorder-upload`; it does not require
+Node.js on the target Mac. The local build performs ad-hoc signing. Production
+Developer ID signing and notarization, if desired, are an operator-managed local
+release step.
 
-## Notes
+## Implemented operating decisions
 
-- Destination changes only affect recordings found afterward. Leave the optional root blank to create date folders directly at the Descript Drive root, and choose the date format in Settings. Each ledger entry saves its resolved folder at discovery time.
-- The API creates missing nested Descript folders during the first matching import. Its folder APIs do not offer a non-mutating path-validation call, so **Test token** verifies authentication without creating a project.
-- Reconciliation discovers only local files from the current calendar day (in the configured recording timezone), lists remote projects by saved folder path and deterministic project name, then checks asynchronous import job status.
-- Descript's import API uses a signed direct-upload URL: the app requests it, streams the local recording to it, and polls the returned job.
-- Turn off **Automatically upload discovered sessions** to keep monitoring and discovery active without starting new uploads. Queue sessions can also be marked **Don't upload session**, and individual files can be excluded before an upload begins.
+- MovieRecorder API paths are preferred; destination mappings support mounted
+  volumes on another Mac.
+- `ffprobe` is supplied by the host and performs container/stream probing, not a
+  full frame decode.
+- The browser opens only with `--open` or `server.openBrowser: true`.
+- Gang starts coalesce within ten seconds; ambiguous later starts require review.
+- Operators run the process directly; no LaunchAgent is installed.
+- Project folders use the configured local recording date, and project names use
+  the saved recording name plus `YYYY-MM-DD_HH-mm-ss`.
+
+## Verification
+
+```bash
+npm run typecheck
+npm test
+npm run build:sea
+```
+
+The automated suite covers configuration redaction and permissions, atomic JSON
+recovery and schema rejection, local-calendar behavior including DST, Softron
+parsing and file association, media validation, import payload safety, and the
+loopback API security boundary. A production release still requires the PRD's
+manual four-source MovieRecorder-to-Descript alignment acceptance run.

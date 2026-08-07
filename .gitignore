@@ -1,7 +1,12 @@
 node_modules/
 dist/
+dist-server/
 dist-electron/
 release/
+build/movie-recorder-upload.cjs
+build/sea-config.json
+build/sea-prep.blob
+.local-data/
 *.log
 .DS_Store
 multicorder_example

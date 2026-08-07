@@ -15,7 +15,9 @@ Live instance observed:
 - `GET /info` verifies connectivity and identifies the MovieRecorder instance.
 - `GET /sources` returns stable source `unique_id` values plus `is_recording`,
   `is_paused`, `recording_name`, `recording_start_date`, `recording_end_date`,
-  and each source's enabled destination IDs.
+  and each source's enabled destinations. On the live 4.6.8 instance, each
+  enabled destination also includes `destination_recording_path`, which gives
+  the exact current/completed filename.
 - `GET /sources/{unique_id}` returns the same per-source recording state.
 - `GET /sources/{unique_id}/info` provides a lightweight current-state check,
   including `is_recording` and `is_paused`, but not session dates or filenames.
@@ -46,8 +48,10 @@ added to REST and WebSocket connection URLs.
    `is_recording: false`. Do not close the session when only one camera stops.
 6. Confirm the stopped state with `GET /sources`, save the reported end dates,
    and begin file finalization checks.
-7. Compare each destination directory to its start snapshot. Candidate session
-   files are files that are new or changed during the session. Wait for size and
+7. Resolve the basename of each source's `destination_recording_path` inside the
+   configured local/mounted folder. Also compare the destination directory to
+   its start snapshot to capture manual splits. Candidate session files are the
+   union of those paths and files new or changed during the session. Wait for size and
    modification time to remain unchanged across repeated probes before creating
    the Descript import.
 8. Upload all finalized candidates together. Use a configured Softron source ID
@@ -59,10 +63,11 @@ missed while disconnected.
 
 ## Important API limitation
 
-The inspected REST API does not return the path or filename of a completed
-recording. It returns only the source recording name and the destination folder.
-It also exposes `manual_split`, which can create several files during one
-recording without exposing those filenames through REST.
+The HTML reference does not document the completed filename, but the inspected
+MovieRecorder 4.6.8 response includes `destination_recording_path` inside each
+source's `enabled_destinations`. It also exposes `manual_split`, which can create
+several files during one recording; a directory delta remains necessary to catch
+every split segment.
 
 Therefore the integration needs a filesystem mapping for every file destination:
 
