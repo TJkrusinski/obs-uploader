@@ -201,8 +201,10 @@ export class RecordingCoordinator {
     const today = localDateKey(new Date(), record.eligibilityTimezone)
     if (record.eligibilityDate !== today && !record.descriptJobId && !record.descriptProjectId) throw new Error('Prior-day recordings cannot begin a new upload.')
     await this.ledger.update(recordId, { retryCount: record.retryCount + 1, error: null, reasonCode: null })
-    if (record.descriptJobId || record.descriptProjectId || ['reconciling', 'uploading', 'processing'].includes(record.status)) await this.descript.reconcile(recordId)
-    else await this.finalize(recordId)
+    if (record.descriptJobId || record.descriptProjectId || ['reconciling', 'uploading', 'processing'].includes(record.status)) {
+      const outcome = await this.descript.reconcile(recordId)
+      if (outcome === 'missing' && record.eligibilityDate === today) await this.descript.upload(recordId)
+    } else await this.finalize(recordId)
     this.changed()
   }
 

@@ -13,6 +13,11 @@ const record = (files) => ({ descriptProjectName: 'Gang', descriptFolder: 'Studi
 
 test('builds one synchronized Recording composition with Program ordered first', () => {
   const body = buildDescriptImportBody(record([file('Camera.mp4', 'iso', 1.25), file('Program.mp4', 'primary', 0)]))
+  assert.equal(body.project_name, 'Gang')
+  assert.equal(body.folder_name, 'Studio/26-08-07')
+  assert.equal(body.team_access, 'edit')
+  assert.equal('name' in body, false)
+  assert.equal('folder_path' in body, false)
   assert.deepEqual(body.add_media['Softron Session'], { tracks: [{ media: 'Program.mp4', offset: 0 }, { media: 'Camera.mp4', offset: 1.25 }] })
   assert.deepEqual(body.add_compositions, [{ name: 'Recording', width: 1920, height: 1080, clips: [{ media: 'Softron Session' }] }])
 })

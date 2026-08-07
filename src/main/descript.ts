@@ -84,12 +84,15 @@ export class DescriptClient {
   }
   async upload(recordId: string): Promise<void> {
     let record = this.ledger.find(recordId); if (!record) throw new Error('Recording not found.')
+    const previousAttempt = { id: record.importAttemptId, hash: record.importPayloadHash, reason: record.reasonCode }
     const remote = await this.reconcile(recordId)
     if (remote !== 'missing') return
     record = this.ledger.find(recordId)!
     const body = buildDescriptImportBody(record)
     const payload = JSON.stringify(body); const payloadHash = createHash('sha256').update(payload).digest('hex')
-    const attemptId = record.importAttemptId ?? randomUUID()
+    const attemptId = previousAttempt.reason === 'ambiguous_import' && previousAttempt.hash === payloadHash && previousAttempt.id
+      ? previousAttempt.id
+      : randomUUID()
     await this.ledger.update(recordId, { status: 'uploading', importPayloadHash: payloadHash, importAttemptId: attemptId, error: null })
     let response: Response
     try {

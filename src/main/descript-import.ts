@@ -3,8 +3,9 @@ import type { RecordingRecord } from '../shared/types.js'
 type UploadMedia = { content_type: string; file_size: number }
 type Multitrack = { tracks: Array<{ media: string; offset: number }> }
 export interface DescriptImportBody {
-  name: string
-  folder_path: string
+  project_name: string
+  folder_name: string
+  team_access: 'edit'
   add_media: Record<string, UploadMedia | Multitrack>
   add_compositions: Array<{ name: 'Recording'; width: 1920; height: 1080; clips: Array<{ media: string }> }>
 }
@@ -26,7 +27,7 @@ export function buildDescriptImportBody(record: RecordingRecord): DescriptImport
   const logicalKey = 'Softron Session'
   addMedia[logicalKey] = { tracks: files.map((file) => ({ media: file.mediaKey, offset: file.timelineOffsetSeconds })) }
   return {
-    name: record.descriptProjectName, folder_path: record.descriptFolder, add_media: addMedia,
+    project_name: record.descriptProjectName, folder_name: record.descriptFolder, team_access: 'edit', add_media: addMedia,
     add_compositions: [{ name: 'Recording', width: 1920, height: 1080, clips: [{ media: logicalKey }] }]
   }
 }
